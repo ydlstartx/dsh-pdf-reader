@@ -1,0 +1,57 @@
+name: Bug report
+description: 报告可复现的 PDF 阅读、批注、保存或 AI 交互问题
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传包含隐私、凭据或受版权保护内容的真实 PDF；优先提供可公开的最小样例。
+  - type: input
+    id: version
+    attributes:
+      label: 插件版本或提交
+      placeholder: v0.1.0-beta.3 或 commit SHA
+    validations:
+      required: true
+  - type: input
+    id: harness
+    attributes:
+      label: DeepSeek Harness 版本
+      placeholder: 0.1.1-rc.2
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 浏览器与操作系统
+      placeholder: Chrome 版本、Linux/macOS/Windows
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请说明 PDF 类型（原生文字/扫描页）、页数和具体操作。
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为与日志
+      description: 请先移除路径、文件名、对话内容和密钥等敏感信息。
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 隐私确认
+      options:
+        - label: 我已确认附件和日志不包含凭据、私人 PDF 或个人数据。
+          required: true

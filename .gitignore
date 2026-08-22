@@ -1,0 +1,7 @@
+node_modules/
+lib/
+scripts/shot-*.png
+ui-smoke-artifacts/
+.env
+.env.*
+!.env.example

@@ -1,0 +1,19 @@
+# pnpm 11 requires every dependency lifecycle script to be reviewed. The
+# protobufjs postinstall is optional for this browser-only plugin.
+allowBuilds:
+  protobufjs: false
+
+# Keep pnpm 11's default 24-hour supply-chain delay, while allowing the exact
+# Harness release reviewed for this compatibility update.
+minimumReleaseAge: 1440
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh-api-remotes@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-attachment@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-client-runtime@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-client-ui-conversation@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-client-ui-layout@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-client-ui-slots@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-host-webserver@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-llm@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-tools@0.1.1-rc.2'
+  - '@deepseek-ai/dsh-typert-protocol@0.1.1-rc.2'

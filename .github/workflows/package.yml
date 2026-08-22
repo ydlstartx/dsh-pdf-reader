@@ -1,0 +1,153 @@
+name: Build release package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify source
+        run: pnpm verify
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          package_tag="v$(node -p 'require("./package.json").version')"
+          if [ "$package_tag" != "$RELEASE_TAG" ]; then
+            echo "Package version $package_tag does not match release tag $RELEASE_TAG." >&2
+            exit 1
+          fi
+
+      - name: Build production bundles
+        run: pnpm build
+
+      - name: Pack without rebuilding
+        run: |
+          mkdir -p release-artifacts
+          npm pack --ignore-scripts --pack-destination release-artifacts
+
+      - name: Verify archive contents
+        shell: bash
+        run: |
+          archive="$(find release-artifacts -maxdepth 1 -name '*.tgz' -print -quit)"
+          test -n "$archive"
+          tar -tzf "$archive" > release-artifacts/contents.txt
+          grep -qx 'package/lib/index.js' release-artifacts/contents.txt
+          grep -qx 'package/lib/client.js' release-artifacts/contents.txt
+          grep -qx 'package/cordis.yml' release-artifacts/contents.txt
+          grep -qx 'package/LICENSE' release-artifacts/contents.txt
+          grep -qx 'package/THIRD_PARTY_NOTICES.md' release-artifacts/contents.txt
+          grep -qx 'package/LICENSES/Apache-2.0.txt' release-artifacts/contents.txt
+          grep -qx 'package/LICENSES/Boost-1.0.txt' release-artifacts/contents.txt
+          if grep -Eq '(^|/)\.env($|\.)' release-artifacts/contents.txt; then
+            echo 'Refusing to package an environment file.' >&2
+            exit 1
+          fi
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-pdf-reader-${{ github.ref_name }}
+          path: release-artifacts/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  prerelease:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download package artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dsh-pdf-reader-${{ github.ref_name }}
+          path: release-artifacts
+
+      - name: Publish GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          asset="$(find release-artifacts -maxdepth 1 -type f -name '*.tgz' -print -quit)"
+          test -n "$asset"
+          asset_name="$(basename "$asset")"
+
+          case "$asset_name" in
+            *[!A-Za-z0-9._-]*)
+              echo "Unexpected release asset name: $asset_name" >&2
+              exit 1
+              ;;
+          esac
+
+          release_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq ".[] | select(.tag_name == \"${RELEASE_TAG}\") | .id" |
+              head -n 1
+          )"
+
+          if [ -z "$release_id" ]; then
+            release_id="$(
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/releases" \
+                -f tag_name="$RELEASE_TAG" \
+                -f name="$RELEASE_TAG" \
+                -F draft=true \
+                -F prerelease=true \
+                -F generate_release_notes=true \
+                --jq '.id'
+            )"
+          fi
+
+          asset_state="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?per_page=100" \
+              --jq ".[] | select(.name == \"${asset_name}\") | .state" |
+              head -n 1
+          )"
+
+          if [ -z "$asset_state" ]; then
+            curl --fail-with-body --silent --show-error \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              --header "Content-Type: application/octet-stream" \
+              --data-binary "@${asset}" \
+              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets?name=${asset_name}" \
+              >/dev/null
+          elif [ "$asset_state" != "uploaded" ]; then
+            echo "Release asset $asset_name exists in unexpected state: $asset_state" >&2
+            exit 1
+          fi
+
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f name="$RELEASE_TAG" \
+            -F draft=false \
+            -F prerelease=true \
+            --silent

@@ -1,0 +1,6 @@
+# dsh-pdf-reader bundle patch. The package name resolves from the profile's
+# dependency tree after `dsh plugin --profile web add <this dir>` installs it.
+
+- insert:
+    - id: dsh-pdf-reader
+      name: 'dsh-pdf-reader'

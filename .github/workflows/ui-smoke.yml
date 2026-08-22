@@ -1,0 +1,96 @@
+name: Harness browser compatibility smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  browser-smoke:
+    name: Open and navigate PDFs in Harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out plugin
+        uses: actions/checkout@v4
+        with:
+          path: plugin
+
+      - name: Check out DeepSeek Harness
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: master
+          path: harness
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            harness/pnpm-lock.yaml
+            plugin/pnpm-lock.yaml
+
+      - name: Install and build DeepSeek Harness
+        run: |
+          pnpm --dir harness install --frozen-lockfile
+          pnpm --dir harness build
+
+      - name: Install and build plugin
+        run: |
+          pnpm --dir plugin install --frozen-lockfile
+          pnpm --dir plugin build
+
+      - name: Install plugin into test profile
+        run: pnpm --dir harness dsh plugin --profile web add "$GITHUB_WORKSPACE/plugin"
+
+      - name: Start Harness Web UI
+        run: |
+          pnpm --dir harness dsh web > harness-web.log 2>&1 &
+          echo "$!" > harness-web.pid
+          for attempt in $(seq 1 90); do
+            if curl --fail --silent http://127.0.0.1:3080 >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          tail -n 200 harness-web.log
+          exit 1
+
+      - name: Run PDF reader browser smoke
+        env:
+          DSH_ROOT: ${{ github.workspace }}/harness
+          UI_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/ui-smoke-artifacts
+        run: node plugin/scripts/ci-smoke.mjs
+
+      - name: Stop Harness Web UI
+        if: always()
+        run: |
+          if [ -f harness-web.pid ]; then
+            kill "$(cat harness-web.pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload browser smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-browser-smoke-${{ github.run_id }}
+          path: |
+            harness-web.log
+            ui-smoke-artifacts
+          if-no-files-found: warn
+          retention-days: 7
