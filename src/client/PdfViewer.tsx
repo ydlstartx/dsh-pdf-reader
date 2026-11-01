@@ -2381,6 +2381,16 @@ const PdfPage = memo(function PdfPage(props: {
   }, [page])
 
   // Arm the layer once the page has been on screen long enough to be read.
+  // Text-layer geometry follows the settled layout scale: dragging the panel or
+  // the sidebar changes it every frame, and rebuilding there costs hundreds of
+  // milliseconds per step.
+  const [settledLayoutScale, setSettledLayoutScale] = useState(layoutScale)
+  useEffect(() => {
+    if (settledLayoutScale === layoutScale) return
+    const timer = window.setTimeout(() => { setSettledLayoutScale(layoutScale) }, TEXT_LAYER_SETTLE_MS)
+    return () => { window.clearTimeout(timer) }
+  }, [layoutScale, settledLayoutScale])
+
   const [textLayerArmed, setTextLayerArmed] = useState(false)
   useEffect(() => {
     if (page === undefined || textContent === undefined) return
@@ -2401,7 +2411,7 @@ const PdfPage = memo(function PdfPage(props: {
     textLayerTaskRef.current?.cancel()
     container.replaceChildren()
     const viewport = page.getViewport({
-      scale: layoutScale,
+      scale: settledLayoutScale,
       rotation: normalizePdfRotation(page.rotate + rotation),
     })
     const task = new TextLayer({ textContentSource: textContent, container, viewport })
@@ -2416,7 +2426,7 @@ const PdfPage = memo(function PdfPage(props: {
       if (textLayerTaskRef.current === task) textLayerTaskRef.current = undefined
       container.replaceChildren()
     }
-  }, [layoutScale, page, props.textWorkUrgent, rotation, textContent, textLayerArmed])
+  }, [page, props.textWorkUrgent, rotation, settledLayoutScale, textContent, textLayerArmed])
 
   useEffect(() => {
     if (props.interactionMode !== 'crop') setDrag(undefined)
@@ -3282,6 +3292,19 @@ export function PdfViewer(props: PdfViewerProps) {
   const frameMetricsRef = useRef(frameMetrics)
   const [viewportW, setViewportW] = useState(() => window.innerWidth)
   const resizePointerRef = useRef<number | null>(null)
+  /** Re-measures fit width; the divider drag suppresses the observer meanwhile. */
+  const refreshFitViewportRef = useRef<() => void>(() => {})
+  /** Frame styles the docked reader rewrote; restored when it closes. */
+  const pushed = useRef<{
+    frame: HTMLElement
+    margin: string
+    overflow: string
+    sidebar: HTMLElement | null
+    sidebarPosition: string
+    sidebarLeft: string
+    handle: HTMLElement | null
+    handleTransform: string
+  } | null>(null)
   // The automatic reader width is chosen against the layout present when this
   // reader first settles. Opening a workspace/outline sidebar or resizing the
   // right Sidebar may move the reader, but must not resize all PDF pages and
@@ -3517,6 +3540,24 @@ export function PdfViewer(props: PdfViewerProps) {
    * viewer and relayouts every mounted page, which is what made the drag feel
    * stuck. Pages therefore reflow once, when the gesture settles.
    */
+  /**
+   * Move the docked reader without a React render.
+   *
+   * The panel, the frame it pushed aside, the pulled-back sidebar, and the
+   * sidebar handle are four inline styles that must agree; writing them here
+   * keeps both sides of the divider live during a drag while PDF geometry
+   * (which would relayout every mounted page) waits for the release.
+   * @param width - reader width in CSS pixels.
+   */
+  const applyPushWidth = (width: number): void => {
+    const panel = widePanelRef.current
+    if (panel !== null) panel.style.width = `${String(width)}px`
+    const saved = pushed.current
+    if (saved === null) return
+    saved.frame.style.marginLeft = `${String(width)}px`
+    if (saved.sidebar !== null) saved.sidebar.style.left = `-${String(width)}px`
+    if (saved.handle !== null) saved.handle.style.transform = `translateX(-${String(width)}px)`
+  }
   const moveWideResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (resizePointerRef.current !== event.pointerId || geometry.overlay) return
     const panel = widePanelRef.current
@@ -3527,8 +3568,9 @@ export function PdfViewer(props: PdfViewerProps) {
       Math.max(MIN_READER_WIDTH, viewportW - frameMetrics.sidebar - frameMetrics.rightbar - MIN_CONVERSATION_WIDTH),
     ))
     pendingWideWidth.current = nextWidth
-    panel.style.width = `${String(nextWidth)}px`
+    applyPushWidth(nextWidth)
   }
+
   const finishWideResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (resizePointerRef.current !== event.pointerId) return
     resizePointerRef.current = null
@@ -3537,6 +3579,8 @@ export function PdfViewer(props: PdfViewerProps) {
     if (nextWidth === 0) return
     setWidePx(nextWidth)
     props.onWideWidthChange(nextWidth)
+    // The observer stayed quiet during the gesture; fit the pages once now.
+    requestAnimationFrame(() => { refreshFitViewportRef.current() })
   }
 
   type CornerControl = 'navigation' | 'zoom'
@@ -4146,18 +4190,6 @@ export function PdfViewer(props: PdfViewerProps) {
     }
   }, [geometry.overlay, frameMetrics])
 
-  // Capture the elements the wide mode restyles, restoring them on exit.
-  const pushed = useRef<{
-    frame: HTMLElement
-    margin: string
-    overflow: string
-    sidebar: HTMLElement | null
-    sidebarPosition: string
-    sidebarLeft: string
-    handle: HTMLElement | null
-    handleTransform: string
-  } | null>(null)
-
   // Push the app frame right of the panel, then offset the sidebar column
   // (and its drag handle) BACK to the left edge: final order is
   // [sidebar][pdf panel][conversation]. The frame is a block-level grid, so
@@ -4186,20 +4218,19 @@ export function PdfViewer(props: PdfViewerProps) {
       handle,
       handleTransform: handle?.style.transform ?? '',
     }
-    saved.frame.style.marginLeft = `${String(panelW)}px`
+    pushed.current = saved
+    // `position: relative` rather than `transform` on the sidebar column: a
+    // transform would make it a containing block for its fixed descendants and
+    // squeeze Harness's full-viewport Settings modal into the column width.
+    if (saved.sidebar !== null) saved.sidebar.style.position = 'relative'
     // The frame's overflow:hidden would clip the offset sidebar (it sits
     // outside the frame's border box) — unclip while wide.
     saved.frame.style.overflow = 'visible'
-    // `transform` would make the sidebar a containing block for its fixed
-    // descendants, squeezing Harness's full-viewport Settings modal into the
-    // sidebar width. Relative positioning moves the column without changing
-    // the coordinate system used by fixed overlays.
-    if (saved.sidebar !== null) {
-      saved.sidebar.style.position = 'relative'
-      saved.sidebar.style.left = `-${String(panelW)}px`
-    }
-    if (saved.handle !== null) saved.handle.style.transform = `translateX(-${String(panelW)}px)`
+    // The same writer the drag gesture uses, so a committed width and a live
+    // one cannot drift apart.
+    applyPushWidth(panelW)
     return () => {
+      if (pushed.current === saved) pushed.current = null
       saved.frame.style.marginLeft = saved.margin
       saved.frame.style.overflow = saved.overflow
       if (saved.sidebar !== null) {
@@ -4459,13 +4490,24 @@ export function PdfViewer(props: PdfViewerProps) {
       if (widthChanged) setFitWidth(width)
       if (heightChanged) setFitHeight(height)
     }
-    updateFitViewport(scroller.clientWidth, scroller.clientHeight)
+    const measureNow = (): void => {
+      updateFitViewport(scroller.clientWidth, scroller.clientHeight)
+    }
+    refreshFitViewportRef.current = measureNow
+    measureNow()
     const observer = new ResizeObserver((entries) => {
+      // The reader divider resizes this scroller on every pointer step. Fitting
+      // the pages each time rescales every mounted page and its text layer; the
+      // release handler takes one final measurement instead.
+      if (resizePointerRef.current !== null) return
       const rect = entries[0]?.contentRect
       if (rect !== undefined) updateFitViewport(rect.width, rect.height)
     })
     observer.observe(scroller)
-    return () => { observer.disconnect() }
+    return () => {
+      observer.disconnect()
+      refreshFitViewportRef.current = () => {}
+    }
   }, [doc, wide])
 
   // Fit-width changes resize every page and therefore every cumulative page

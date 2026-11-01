@@ -5,3 +5,4 @@ ui-smoke-artifacts/
 .env
 .env.*
 !.env.example
+.dsh-*/

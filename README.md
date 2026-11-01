@@ -70,7 +70,7 @@ DeepSeek Harness 的外部（out-of-tree）PDF 阅读器插件，把阅读、批
 推荐从 GitHub Releases 下载构建好的 `.tgz`，然后在 DeepSeek Harness checkout 根目录执行：
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.8.tgz
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.9.tgz
 pnpm dsh --profile web --dump-config | rg dsh-pdf-reader
 pnpm dsh web
 ```

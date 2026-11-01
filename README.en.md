@@ -70,7 +70,7 @@ See [src/README.md](src/README.md) for the source layout.
 Download the prebuilt `.tgz` from GitHub Releases, then run the following commands from the root of a DeepSeek Harness checkout:
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.8.tgz
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.9.tgz
 pnpm dsh --profile web --dump-config | rg dsh-pdf-reader
 pnpm dsh web
 ```
