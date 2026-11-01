@@ -199,7 +199,11 @@ function cryptoUuid(): string {
     : `${String(Date.now())}-${Math.random().toString(16).slice(2)}`
 }
 
-const DSH_ANNOTATION_PREFIX = 'dsh-pdf-reader:'
+/**
+ * Prefix this plugin writes into every annotation name. Exported so the reader
+ * can recognize its own annotations from the raw bytes without parsing.
+ */
+export const DSH_ANNOTATION_PREFIX = 'dsh-pdf-reader:'
 const MAX_EDITABLE_PDF_ANNOTATIONS = 5_000
 const MAX_EDITABLE_ANNOTATION_RECTS = 128
 const MAX_EDITABLE_ANNOTATION_TEXT = 20_000

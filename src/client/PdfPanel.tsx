@@ -58,7 +58,7 @@ import {
 } from './pdf-evidence.ts'
 import type { PdfTextEvidence } from './pdf-evidence.ts'
 import type { PdfOutlineController } from './pdf-outline.ts'
-import { loadPdfTextMarkupAnnotations, savePdfTextMarkupAnnotations } from './pdf-annotation-save.ts'
+import { DSH_ANNOTATION_PREFIX, loadPdfTextMarkupAnnotations, savePdfTextMarkupAnnotations } from './pdf-annotation-save.ts'
 import {
   addPdfBookmark,
   pdfBookmarkFingerprint,
@@ -196,6 +196,32 @@ function retainedViewBuffer(source: ArrayBuffer, viewBytes: Uint8Array): ArrayBu
     && viewBytes.byteLength === source.byteLength
     ? source
     : copiedArrayBuffer(viewBytes)
+}
+
+/**
+ * Whether these bytes carry an annotation this plugin wrote.
+ *
+ * Reading the outline and the editable annotations means parsing the whole
+ * document with pdf-lib, which costs hundreds of milliseconds on a large book.
+ * Only a document that already contains plugin annotations needs its render
+ * copy stripped; every other document can paint first and pick its outline up
+ * afterwards, so the marker decides the open path.
+ * @param bytes - the PDF source bytes.
+ * @returns true when an annotation name marker is present.
+ */
+function containsDshAnnotationMarker(bytes: ArrayBuffer): boolean {
+  const marker = DSH_ANNOTATION_PREFIX
+  const source = new Uint8Array(bytes)
+  const first = marker.charCodeAt(0)
+  const limit = source.length - marker.length
+  search: for (let index = 0; index <= limit; index += 1) {
+    if (source[index] !== first) continue
+    for (let offset = 1; offset < marker.length; offset += 1) {
+      if (source[index + offset] !== marker.charCodeAt(offset)) continue search
+    }
+    return true
+  }
+  return false
 }
 
 function openPdfBytes(runtimes: ReadonlyMap<string, PdfDocumentRuntime>): number {
@@ -739,7 +765,7 @@ export function PdfPanel(props: PdfPanelProps) {
     restoredBookmarks: readonly PdfBookmark[],
     handle?: PdfFileHandle,
     sourceIdentity?: PdfFileIdentity,
-  ) => {
+  ): string => {
     if (bytes.byteLength > MAX_PDF_BYTES) throw new Error(fileTooLargeMessage(bytes.byteLength))
     if (!hasPdfHeader(bytes)) throw new Error(`文件内容不是有效 PDF: ${name}`)
     const retainedBytes = openPdfBytes(documentRuntimesRef.current)
@@ -788,6 +814,7 @@ export function PdfPanel(props: PdfPanelProps) {
     activateRuntime(documentId)
     setError(undefined)
     changeReaderOpen(true)
+    return documentId
   }, [activateRuntime, captureActiveRuntime, changeReaderOpen])
 
   const fileInput = useRef<HTMLInputElement>(null)
@@ -1016,6 +1043,38 @@ export function PdfPanel(props: PdfPanelProps) {
     evidenceImagesRef.current = []
   }, [])
 
+  /**
+   * Read the editable outline after the page is on screen.
+   *
+   * The bookmark parse needs the whole document and blocks the main thread for
+   * a few hundred milliseconds on a long book. Nothing on the first screen
+   * depends on it, so it runs once the browser reports idle time and the
+   * outline fills in when it lands.
+   */
+  const loadOutlineLater = useCallback((bytes: ArrayBuffer, documentId: string): void => {
+    const run = (): void => {
+      void loadPdfTextMarkupAnnotations(bytes).then((restored) => {
+        const runtime = documentRuntimesRef.current.get(documentId)
+        if (runtime === undefined) return
+        // A reader who started editing before the parse landed owns the
+        // outline now; never replace their work with the late snapshot.
+        if (runtime.bookmarks.length > 0) return
+        runtime.bookmarks = restored.bookmarks
+        runtime.savedBookmarkFingerprint = pdfBookmarkFingerprint(restored.bookmarks)
+        if (activeDocumentIdRef.current !== documentId) return
+        setBookmarks(restored.bookmarks)
+        setSavedBookmarkFingerprint(pdfBookmarkFingerprint(restored.bookmarks))
+      }).catch(() => {
+        // The reader is still usable without an outline.
+      })
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(run, { timeout: 2_500 })
+      return
+    }
+    window.setTimeout(run, 1_200)
+  }, [])
+
   /** Read and validate one browser-selected File. */
   const openFile = useCallback(async (file: File, handle?: PdfFileHandle): Promise<void> => {
     if (!file.name.toLowerCase().endsWith('.pdf')) {
@@ -1035,7 +1094,11 @@ export function PdfPanel(props: PdfPanelProps) {
     setBusy(true)
     try {
       const bytes = await file.arrayBuffer()
-      if (sequence === loadSequenceRef.current) {
+      if (sequence !== loadSequenceRef.current) return
+      const identity = handle === undefined ? undefined : pdfFileIdentity(file)
+      if (containsDshAnnotationMarker(bytes)) {
+        // Painting from unstripped bytes would double-paint this plugin's own
+        // annotations, so a document that has them keeps the sequential path.
         const restored = await loadPdfTextMarkupAnnotations(bytes)
         if (sequence !== loadSequenceRef.current) return
         accept(
@@ -1045,15 +1108,20 @@ export function PdfPanel(props: PdfPanelProps) {
           restored.annotations,
           restored.bookmarks,
           handle,
-          handle === undefined ? undefined : pdfFileIdentity(file),
+          identity,
         )
+        return
       }
+      // Everything the first screen needs is already here: accept the document
+      // and let the outline parse run once the reader is idle.
+      const documentId = accept(file.name, bytes, bytes, [], [], handle, identity)
+      loadOutlineLater(bytes, documentId)
     } catch (cause: unknown) {
       if (sequence === loadSequenceRef.current) setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
       if (sequence === loadSequenceRef.current) setBusy(false)
     }
-  }, [accept])
+  }, [accept, loadOutlineLater])
 
   // Native Chromium opening retains a writable file handle. Other browsers
   // keep the existing input fallback and still support download-style Save As.

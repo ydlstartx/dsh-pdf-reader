@@ -749,6 +749,62 @@ function restorePdfNavigationLocation(
  * jumps, and saved positions without mounting one element per document page.
  */
 const PAGE_WINDOW_RADIUS = 2
+/**
+ * How long a page must stay mounted before its text layer is built. A page the
+ * reader scrolls past in a few frames never pays for one; selection only needs
+ * the layer of a page that is actually being read.
+ */
+const TEXT_LAYER_SETTLE_MS = 140
+/** Still-stand after the last scroll frame before deferred work is admitted. */
+const SCROLL_IDLE_MS = 180
+
+/**
+ * Serialize text-layer builds.
+ *
+ * `TextLayer.render()` measures every glyph run on the main thread: a dense
+ * page costs hundreds of milliseconds here, and one page-window shift can mount
+ * several pages at once. Building one at a time, yielding a frame between
+ * builds, keeps the reader responsive instead of freezing in bursts.
+ */
+const textLayerQueue: Array<() => void> = []
+let textLayerBuildActive = false
+
+/**
+ * Run one queued build after the previous one finished and a frame was served.
+ * @returns nothing; the queue pumps itself.
+ */
+function pumpTextLayerQueue(): void {
+  if (textLayerBuildActive) return
+  const next = textLayerQueue.shift()
+  if (next === undefined) return
+  textLayerBuildActive = true
+  next()
+}
+
+/**
+ * Queue one page's text-layer build.
+ * @param build - resolves when the build settled (success or failure).
+ * @param urgent - the page is being read now, so the build goes to the front.
+ * @returns idempotent cancellation; a cancelled build never starts.
+ */
+function scheduleTextLayerBuild(build: () => Promise<void>, urgent = false): () => void {
+  let cancelled = false
+  const run = (): void => {
+    if (cancelled) {
+      textLayerBuildActive = false
+      pumpTextLayerQueue()
+      return
+    }
+    void build().catch(() => {}).finally(() => {
+      textLayerBuildActive = false
+      window.requestAnimationFrame(() => { window.setTimeout(pumpTextLayerQueue, 0) })
+    })
+  }
+  if (urgent) textLayerQueue.unshift(run)
+  else textLayerQueue.push(run)
+  pumpTextLayerQueue()
+  return () => { cancelled = true }
+}
 const FALLBACK_PAGE_SIZE: PageSize = { width: 595, height: 842 }
 /** One revisit preview stays below ~3 MiB decoded. */
 const PAGE_PREVIEW_MAX_PIXELS = 750_000
@@ -2200,6 +2256,10 @@ const PdfPage = memo(function PdfPage(props: {
   repaintKey: string
   repaintOrder: number
   repaintAllowed: boolean
+  /** The reader is still, so a text layer for this page is worth building. */
+  textWorkAllowed: boolean
+  /** The pointer is on this page, so its text layer is built without waiting. */
+  textWorkUrgent: boolean
   onRepaintSettled: (key: string, order: number) => void
 }) {
   const { doc, pageNumber, layoutScale, renderScale, rotation } = props
@@ -2314,9 +2374,24 @@ const PdfPage = memo(function PdfPage(props: {
     return () => { cancelled = true }
   }, [page])
 
+  // Arm the layer once the page has been on screen long enough to be read.
+  const [textLayerArmed, setTextLayerArmed] = useState(false)
+  useEffect(() => {
+    if (page === undefined || textContent === undefined) return
+    // The pointer resting on a page is the strongest signal that the reader is
+    // about to select text there; the deferred work is skipped in that case.
+    if (props.textWorkUrgent) {
+      setTextLayerArmed(true)
+      return
+    }
+    if (!props.textWorkAllowed) return
+    const timer = window.setTimeout(() => { setTextLayerArmed(true) }, TEXT_LAYER_SETTLE_MS)
+    return () => { window.clearTimeout(timer) }
+  }, [page, props.textWorkAllowed, props.textWorkUrgent, textContent])
+
   useEffect(() => {
     const container = textLayerRef.current
-    if (container === null || page === undefined || textContent === undefined) return
+    if (container === null || page === undefined || textContent === undefined || !textLayerArmed) return
     textLayerTaskRef.current?.cancel()
     container.replaceChildren()
     const viewport = page.getViewport({
@@ -2325,13 +2400,17 @@ const PdfPage = memo(function PdfPage(props: {
     })
     const task = new TextLayer({ textContentSource: textContent, container, viewport })
     textLayerTaskRef.current = task
-    void task.render().catch(() => {})
+    const cancelBuild = scheduleTextLayerBuild(async () => {
+      if (textLayerTaskRef.current !== task) return
+      await task.render()
+    }, props.textWorkUrgent)
     return () => {
+      cancelBuild()
       task.cancel()
       if (textLayerTaskRef.current === task) textLayerTaskRef.current = undefined
       container.replaceChildren()
     }
-  }, [page, rotation, textContent])
+  }, [layoutScale, page, props.textWorkUrgent, rotation, textContent, textLayerArmed])
 
   useEffect(() => {
     if (props.interactionMode !== 'crop') setDrag(undefined)
@@ -2830,6 +2909,8 @@ const PdfPages = memo(function PdfPages(props: {
   onSize: (pageNumber: number, size: PageSize) => void
   pagePreviews: ReadonlyMap<number, HTMLCanvasElement>
   onPagePaint: (pageNumber: number, canvas: HTMLCanvasElement) => void
+  /** The reader is still; pages near the viewport may build their text layer. */
+  textWorkAllowed: boolean
 }) {
   const [hoveredPage, setHoveredPage] = useState<number | undefined>(undefined)
   const [focusedBookmarkPage, setFocusedBookmarkPage] = useState<number | undefined>(undefined)
@@ -2940,6 +3021,11 @@ const PdfPages = memo(function PdfPages(props: {
           repaintKey={repaintKey}
           repaintOrder={repaintOrder}
           repaintAllowed={repaintSequence.key === repaintKey && repaintSequence.turn === repaintOrder}
+          // Only the current page and its immediate neighbours are read; the
+          // prefetched tail keeps its canvas but no text layer. Both flags wait
+          // for the reader to be still: scrolling never builds text layers.
+          textWorkAllowed={props.textWorkAllowed && repaintOrder <= 1}
+          textWorkUrgent={props.textWorkAllowed && (hoveredPage === pageNumber || repaintOrder === 0)}
           onRepaintSettled={handleRepaintSettled}
         />
         {(() => {
@@ -3097,6 +3183,10 @@ export function PdfViewer(props: PdfViewerProps) {
   const selectedEvidenceImages = props.selectedEvidenceImages
   const selectedTextEvidenceIds = props.selectedTextEvidenceIds
   const selectedTextEvidence = textEvidence.filter(source => selectedTextEvidenceIds.has(source.id))
+  /** True while the reader has been still long enough for text work to pay off. */
+  const [scrollIdle, setScrollIdle] = useState(true)
+  const scrollIdleRef = useRef(true)
+  const scrollIdleTimerRef = useRef<number | undefined>(undefined)
   const [readingAnchor, setReadingAnchor] = useState<PdfStoredReadingAnchor>(() => restoredState?.readingAnchor ?? {
     pageNumber: 1,
     pageXRatio: 0.5,
@@ -4558,25 +4648,26 @@ export function PdfViewer(props: PdfViewerProps) {
     const scroller = scrollerRef.current
     if (scroller === null) return
     let raf: number | null = null
+    // Scrolling marks the reader busy and clears it after a short still
+    // period; text work and the persisted anchor wait for that.
+    const markScrolling = (): void => {
+      if (scrollIdleRef.current) {
+        scrollIdleRef.current = false
+        setScrollIdle(false)
+      }
+      if (scrollIdleTimerRef.current !== undefined) window.clearTimeout(scrollIdleTimerRef.current)
+      scrollIdleTimerRef.current = window.setTimeout(() => {
+        scrollIdleTimerRef.current = undefined
+        scrollIdleRef.current = true
+        setScrollIdle(true)
+      }, SCROLL_IDLE_MS)
+    }
     const schedule = (): void => {
       if (zoomGestureActiveRef.current) return
       raf ??= requestAnimationFrame(() => {
         raf = null
+        markScrolling()
         updateCurrentPageFromViewport()
-        const anchor = capturePageLayoutAnchor(scroller)
-        if (anchor !== undefined) {
-          setReadingAnchor(current => (
-            current.pageNumber === anchor.pageNumber
-              && Math.abs(current.pageXRatio - anchor.pageXRatio) < 0.0005
-              && Math.abs(current.pageYRatio - anchor.pageYRatio) < 0.0005
-              ? current
-              : {
-                  pageNumber: anchor.pageNumber,
-                  pageXRatio: anchor.pageXRatio,
-                  pageYRatio: anchor.pageYRatio,
-                }
-          ))
-        }
       })
     }
     scroller.addEventListener('scroll', schedule, { passive: true })
@@ -4584,8 +4675,34 @@ export function PdfViewer(props: PdfViewerProps) {
     return () => {
       scroller.removeEventListener('scroll', schedule)
       if (raf !== null) cancelAnimationFrame(raf)
+      if (scrollIdleTimerRef.current !== undefined) {
+        window.clearTimeout(scrollIdleTimerRef.current)
+        scrollIdleTimerRef.current = undefined
+      }
     }
   }, [doc, updateCurrentPageFromViewport])
+
+  // Persisting the reading anchor is a restore hint, not a live readout: one
+  // commit per still-stand (plus one per page change) is enough, and committing
+  // it every scroll frame re-rendered the whole reader for nothing.
+  useEffect(() => {
+    if (!scrollIdle) return
+    const scroller = scrollerRef.current
+    if (scroller === null) return
+    const anchor = capturePageLayoutAnchor(scroller)
+    if (anchor === undefined) return
+    setReadingAnchor(current => (
+      current.pageNumber === anchor.pageNumber
+        && Math.abs(current.pageXRatio - anchor.pageXRatio) < 0.0005
+        && Math.abs(current.pageYRatio - anchor.pageYRatio) < 0.0005
+        ? current
+        : {
+            pageNumber: anchor.pageNumber,
+            pageXRatio: anchor.pageXRatio,
+            pageYRatio: anchor.pageYRatio,
+          }
+    ))
+  }, [currentPage, scrollIdle])
 
   /** Scroll one page into view (1-based; clamped to the document). */
   const gotoPage = useCallback((page: number): void => {
@@ -6994,6 +7111,7 @@ export function PdfViewer(props: PdfViewerProps) {
                 onSize={handlePageSize}
                 pagePreviews={pagePreviews}
                 onPagePaint={retainPagePreview}
+                textWorkAllowed={scrollIdle && !zoomGestureActiveRef.current}
               />
             </div>
           </div>
