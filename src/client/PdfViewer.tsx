@@ -258,6 +258,12 @@ export interface PdfViewerProps {
   onOutlineChange: (outline: PdfOutlineController | undefined) => void
   /** Toggle the desktop PDF search surface; returns whether it is open. */
   onSearchToggle: () => boolean
+  /**
+   * Ask the Host page for the width its own right column is holding. The reader
+   * only asks when the alternative is covering the whole frame, and only once
+   * per document, so a reader who reopens that column keeps it.
+   */
+  onNeedRoom: () => void
 }
 
 /** CSS-px rectangle relative to one page canvas. */
@@ -4118,6 +4124,18 @@ export function PdfViewer(props: PdfViewerProps) {
     }
   }, [wide])
 
+  // A full-viewport overlay hides the left sidebar and the right column, which
+  // leaves the reader's own tools as the only way to the outline. Ask the Host
+  // for the room its column holds first; a narrow viewport still ends up in the
+  // overlay, where the reader exposes search and outline itself.
+  const roomRequestedRef = useRef(false)
+  useEffect(() => {
+    if (!wide || roomRequestedRef.current) return
+    if (!geometry.overlay || frameMetrics.rightbar === 0) return
+    roomRequestedRef.current = true
+    props.onNeedRoom()
+  }, [frameMetrics.rightbar, geometry.overlay, props.onNeedRoom, wide])
+
   // Commit the final `left` and remove the temporary compositor offset in
   // the same pre-paint phase, so the handoff is visually continuous.
   useLayoutEffect(() => {
@@ -4743,13 +4761,10 @@ export function PdfViewer(props: PdfViewerProps) {
       if (searchShortcut) {
         event.preventDefault()
         event.stopPropagation()
-        let opened: boolean
-        if (geometry.overlay) {
-          opened = navigationDrawer !== 'search'
-          setNavigationDrawer(opened ? 'search' : undefined)
-        } else {
-          opened = props.onSearchToggle()
-        }
+        // Search always opens inside the reader: the Harness sidebar can be a
+        // drawer the window has no room for, and a hidden search looks broken.
+        const opened = navigationDrawer !== 'search'
+        setNavigationDrawer(opened ? 'search' : undefined)
         if (opened) focusSearchInput()
         return
       }
@@ -4783,7 +4798,7 @@ export function PdfViewer(props: PdfViewerProps) {
     }
     window.addEventListener('keydown', onShortcut, { capture: true })
     return () => { window.removeEventListener('keydown', onShortcut, { capture: true }) }
-  }, [commitAnchoredZoom, currentPage, doc, geometry.overlay, gotoPage, navigationDrawer, props.onSearchToggle, wide])
+  }, [commitAnchoredZoom, currentPage, doc, gotoPage, navigationDrawer, wide])
 
   const updateNavigationAvailability = useCallback((): void => {
     setNavigationAvailability({
@@ -5133,7 +5148,7 @@ export function PdfViewer(props: PdfViewerProps) {
   // effect revision as teardown would close the sidebar between two values.
   useEffect(() => () => { props.onOutlineChange(undefined) }, [props.onOutlineChange])
   useEffect(() => {
-    if (!wide || !geometry.overlay || outlineController === undefined) setNavigationDrawer(undefined)
+    if (!wide || outlineController === undefined) setNavigationDrawer(undefined)
   }, [geometry.overlay, outlineController, wide])
 
   const clearEvidenceHighlight = (): void => {
@@ -6977,17 +6992,25 @@ export function PdfViewer(props: PdfViewerProps) {
           >
             <AnnotationListPdfIcon />
           </PdfToolbarButton>
-          {geometry.overlay && outlineController !== undefined && (
-            <PdfToolbarButton onClick={() => {
-              setAnnotationDrawerOpen(false)
-              setNavigationDrawer('search')
-            }}>搜索</PdfToolbarButton>
+          {outlineController !== undefined && (
+            <PdfToolbarButton
+              data-pdf-navigation-open="search"
+              aria-label="在阅读器内搜索 PDF 文字"
+              onClick={() => {
+                setAnnotationDrawerOpen(false)
+                setNavigationDrawer('search')
+              }}
+            >搜索</PdfToolbarButton>
           )}
-          {geometry.overlay && outlineController !== undefined && (
-            <PdfToolbarButton onClick={() => {
-              setAnnotationDrawerOpen(false)
-              setNavigationDrawer('outline')
-            }}>目录</PdfToolbarButton>
+          {outlineController !== undefined && (
+            <PdfToolbarButton
+              data-pdf-navigation-open="outline"
+              aria-label="在阅读器内打开 PDF 目录"
+              onClick={() => {
+                setAnnotationDrawerOpen(false)
+                setNavigationDrawer('outline')
+              }}
+            >目录</PdfToolbarButton>
           )}
           {props.evidenceImages.length + textEvidence.length > 0 && (
             <PdfToolbarButton
@@ -7388,7 +7411,7 @@ export function PdfViewer(props: PdfViewerProps) {
       width: `${String(panelW)}px`,
     }}>
       {body}
-      {geometry.overlay && navigationDrawer !== undefined && outlineController !== undefined && (
+      {navigationDrawer !== undefined && outlineController !== undefined && (
         <PdfOutlinePanel
           controller={outlineController}
           mode={navigationDrawer}
