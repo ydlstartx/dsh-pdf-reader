@@ -96,6 +96,22 @@ test('host refusals and unreachable routes surface displayable reasons', async (
         && error.message === '当前 Harness 没有可用的默认模型，无法快速翻译',
     )
 
+    // A running Host that predates the route answers a bare 404 with no body.
+    globalThis.fetch = (async () => new Response(null, { status: 404 })) as typeof fetch
+    await assert.rejects(
+      () => requestPdfQuickTranslation('attention'),
+      (error: unknown) => error instanceof PdfQuickTranslationError
+        && /翻译路由未加载/u.test(error.message)
+        && /重启 dsh web/u.test(error.message),
+    )
+
+    globalThis.fetch = (async () => new Response('<html>oops</html>', { status: 500 })) as typeof fetch
+    await assert.rejects(
+      () => requestPdfQuickTranslation('attention'),
+      (error: unknown) => error instanceof PdfQuickTranslationError
+        && /HTTP 500/u.test(error.message),
+    )
+
     globalThis.fetch = (async () => {
       throw new Error('network down')
     }) as typeof fetch

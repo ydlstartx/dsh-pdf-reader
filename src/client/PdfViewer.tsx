@@ -5522,6 +5522,36 @@ export function PdfViewer(props: PdfViewerProps) {
           aria-label={annotationMenu.kind === 'selection' ? '创建文字标记' : '编辑文字标记'}
           style={styles.annotationMenu}
         >
+          {annotationMenu.kind === 'selection' && (
+            <>
+              <button
+                type="button"
+                data-pdf-annotation-action="true"
+                data-pdf-quick-translate="true"
+                aria-label="快速翻译选中文字"
+                aria-pressed={quickTranslate !== undefined}
+                title="快速翻译（英文 ↔ 中文）"
+                style={{
+                  ...styles.quickTranslateButton,
+                  background: quickTranslate !== undefined ? 'rgba(77,107,254,0.12)' : 'transparent',
+                  color: quickTranslate !== undefined ? '#3154d8' : '#71717a',
+                }}
+                onClick={() => {
+                  setAnnotationPaletteOpen(false)
+                  setAnnotationAiMenuOpen(false)
+                  setAnnotationAiQuestionOpen(false)
+                  if (quickTranslate !== undefined) {
+                    closeQuickTranslate()
+                    return
+                  }
+                  translatePendingSelection(annotationMenu.pending.text)
+                }}
+              >
+                译
+              </button>
+              <span aria-hidden="true" style={styles.annotationMenuDivider} />
+            </>
+          )}
           <span data-pdf-highlight-action="true" style={styles.annotationHighlightAction}>
             <button
               type="button"
@@ -5762,31 +5792,6 @@ export function PdfViewer(props: PdfViewerProps) {
                 }}
               >
                 {annotationCopyStatus === 'copied' ? <CheckPdfIcon /> : <CopyPdfIcon />}
-              </button>
-              <button
-                type="button"
-                data-pdf-annotation-action="true"
-                data-pdf-quick-translate="true"
-                aria-label="快速翻译选中文字"
-                aria-pressed={quickTranslate !== undefined}
-                title="快速翻译（英文 ↔ 中文）"
-                style={{
-                  ...styles.quickTranslateButton,
-                  background: quickTranslate !== undefined ? 'rgba(77,107,254,0.12)' : 'transparent',
-                  color: quickTranslate !== undefined ? '#3154d8' : '#71717a',
-                }}
-                onClick={() => {
-                  setAnnotationPaletteOpen(false)
-                  setAnnotationAiMenuOpen(false)
-                  setAnnotationAiQuestionOpen(false)
-                  if (quickTranslate !== undefined) {
-                    closeQuickTranslate()
-                    return
-                  }
-                  translatePendingSelection(annotationMenu.pending.text)
-                }}
-              >
-                译
               </button>
               <span style={styles.annotationAiAction}>
                 <button

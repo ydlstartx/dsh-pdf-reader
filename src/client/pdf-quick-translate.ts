@@ -67,14 +67,24 @@ export async function requestPdfQuickTranslation(
     throw new PdfQuickTranslationError(`无法连接翻译服务：${errorMessage(cause)}`)
   }
 
-  let body: unknown
+  // An unmatched route answers a bare 404 with no body, so read the text once
+  // and report the status instead of pretending the payload was malformed.
+  let raw = ''
   try {
-    body = await response.json()
+    raw = await response.text()
   } catch {
-    throw new PdfQuickTranslationError('翻译服务返回了无法解析的结果')
+    raw = ''
+  }
+  let body: unknown
+  if (raw.trim().length > 0) {
+    try {
+      body = JSON.parse(raw)
+    } catch {
+      body = undefined
+    }
   }
   if (typeof body !== 'object' || body === null) {
-    throw new PdfQuickTranslationError('翻译服务返回了无法解析的结果')
+    throw new PdfQuickTranslationError(translationRouteFailure(response.status))
   }
   const record = body as { ok?: unknown; translation?: unknown; error?: unknown }
   if (record.ok !== true) {
@@ -100,6 +110,19 @@ export async function requestPdfQuickTranslation(
 export function quickTranslationErrorText(cause: unknown): string {
   const message = errorMessage(cause).trim()
   return message.length === 0 ? '翻译失败' : message
+}
+
+/**
+ * Explain one response that carried no usable JSON body.
+ * @param status - HTTP status the route answered with.
+ * @returns display copy naming the actionable cause when it is known.
+ */
+function translationRouteFailure(status: number): string {
+  // The Host half registers this route when `apply` runs, so a running
+  // instance started before the plugin was rebuilt knows nothing about it.
+  if (status === 404) return '翻译路由未加载（HTTP 404）：请重启 dsh web 后再试'
+  if (status === 403) return '翻译请求被拒绝（HTTP 403）：请从 Harness 页面重新打开阅读器'
+  return `翻译服务不可用（HTTP ${String(status)}）`
 }
 
 function errorMessage(cause: unknown): string {
