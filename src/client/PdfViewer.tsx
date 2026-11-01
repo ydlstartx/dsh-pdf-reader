@@ -11,7 +11,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ButtonHTMLAttributes, CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { createPortal } from 'react-dom'
-import { computeWideGeometry } from './geometry.ts'
+import { computeWideGeometry, MIN_CONVERSATION_WIDTH, MIN_READER_WIDTH } from './geometry.ts'
 import { loadPdfDocument, TextLayer } from './pdfjs.ts'
 import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from './pdfjs.ts'
 import {
@@ -781,23 +781,43 @@ function isPdfShortcutSpaceTarget(target: EventTarget | null): boolean {
     || target.closest('button, a[href], [role="button"], [role="link"]') !== null
 }
 
+/** The Harness frame tracks the reader has to dock around. */
+interface HarnessFrameMetrics {
+  /** Left column width that consumes a grid track; 0 while the sidebar is a drawer overlay. */
+  sidebar: number
+  /** Right column width that consumes a grid track; 0 while collapsed or fullscreen. */
+  rightbar: number
+  /** The sidebar overlays the frame instead of taking a column. */
+  drawer: boolean
+}
+
+const EMPTY_HARNESS_FRAME: HarnessFrameMetrics = { sidebar: 0, rightbar: 0, drawer: false }
+
 /**
- * Read the already-rendered Harness sidebar before a replacement viewer's
- * first paint.
+ * Read the already-rendered Harness frame before a replacement viewer's first
+ * paint.
  *
- * The frame's first grid track IS the sidebar column, so the resolved template
- * answers the question for every layout revision: a wide column, a collapsed
- * rail, and the drawer frame (track 0, sidebar overlaid) all read correctly.
- * Measuring a child element does not — the frame's children are not ordered by
- * column.
+ * The resolved grid template answers the question for every layout revision:
+ * a wide sidebar, a collapsed rail, and the drawer frame all read correctly,
+ * and so does the right Sidebar's own column. Measuring child elements does
+ * not — the frame's children are not ordered by column, and one of them is the
+ * drawer mask.
+ * @returns the docking metrics, or the zero metrics outside a Harness frame.
  */
-function currentHarnessSidebarWidth(): number {
-  if (typeof document === 'undefined') return 0
+function readHarnessFrameMetrics(): HarnessFrameMetrics {
+  if (typeof document === 'undefined') return EMPTY_HARNESS_FRAME
   const frame = document.querySelector<HTMLElement>('div[style*="grid-template-columns"]')
-  if (frame === null) return 0
-  const track = getComputedStyle(frame).gridTemplateColumns.split(/\s+/u)[0] ?? ''
-  const width = Number.parseFloat(track)
-  return Number.isFinite(width) && width > 0 ? width : 0
+  if (frame === null) return EMPTY_HARNESS_FRAME
+  const tracks = getComputedStyle(frame).gridTemplateColumns.split(/\s+/u)
+  const trackWidth = (value: string | undefined): number => {
+    const width = Number.parseFloat(value ?? '')
+    return Number.isFinite(width) && width > 0 ? width : 0
+  }
+  return {
+    sidebar: frame.hasAttribute('data-sidebar-drawer') ? 0 : trackWidth(tracks[0]),
+    rightbar: trackWidth(tracks[2]),
+    drawer: frame.hasAttribute('data-sidebar-drawer'),
+  }
 }
 
 const styles = {
@@ -3158,23 +3178,31 @@ export function PdfViewer(props: PdfViewerProps) {
   const { wide } = props
   /** Wide-mode panel width in px (0 = not yet chosen; defaults to 55% of the viewport). */
   const [widePx, setWidePx] = useState(() => Math.max(0, props.initialWideWidth))
-  /** Rendered width of the app's sidebar column (the rail the panel docks after). */
-  const [sidebarW, setSidebarW] = useState(() => wide ? currentHarnessSidebarWidth() : 0)
-  /** Last sidebar position committed into React geometry. */
-  const sidebarWRef = useRef(sidebarW)
+  /** Tracks the reader docks around: the left column, the right Sidebar, the drawer mode. */
+  const [frameMetrics, setFrameMetrics] = useState<HarnessFrameMetrics>(
+    () => (wide ? readHarnessFrameMetrics() : EMPTY_HARNESS_FRAME),
+  )
+  /** Last frame metrics committed into React geometry. */
+  const frameMetricsRef = useRef(frameMetrics)
   const [viewportW, setViewportW] = useState(() => window.innerWidth)
   const resizePointerRef = useRef<number | null>(null)
-  // The automatic reader width is chosen against the sidebar state present
-  // when this reader first settles. Opening a workspace/outline sidebar may
-  // move the reader, but must not resize all PDF pages and relayout a long
-  // document. The current sidebar still participates in the conversation
-  // minimum clamp below, so an actually tight viewport remains safe.
-  const initialSidebarWRef = useRef(sidebarW)
-  if (initialSidebarWRef.current === 0 && sidebarW > 0) initialSidebarWRef.current = sidebarW
-  const automaticPanelW = initialSidebarWRef.current > 0
-    ? Math.round((viewportW - initialSidebarWRef.current) * 0.55)
-    : 0
-  const geometry = computeWideGeometry(viewportW, sidebarW, widePx > 0 ? widePx : automaticPanelW)
+  // The automatic reader width is chosen against the layout present when this
+  // reader first settles. Opening a workspace/outline sidebar or resizing the
+  // right Sidebar may move the reader, but must not resize all PDF pages and
+  // relayout a long document. Both current outer columns still participate in
+  // the conversation minimum clamp below, so an actually tight viewport stays
+  // safe.
+  const initialStateRef = useRef(frameMetrics)
+  if (initialStateRef.current.sidebar === 0 && frameMetrics.sidebar > 0) {
+    initialStateRef.current = frameMetrics
+  }
+  const automaticPanelW = Math.round(Math.max(0, viewportW - initialStateRef.current.sidebar) * 0.55)
+  const geometry = computeWideGeometry(
+    viewportW,
+    frameMetrics.sidebar,
+    frameMetrics.rightbar,
+    widePx > 0 ? widePx : automaticPanelW,
+  )
   const panelW = geometry.panelWidth
   useLayoutEffect(() => {
     const frame = window.requestAnimationFrame(() => {
@@ -3375,21 +3403,44 @@ export function PdfViewer(props: PdfViewerProps) {
     return () => { window.removeEventListener('resize', onResize) }
   }, [])
 
+  /** Width the drag last painted, committed to React only when the gesture ends. */
+  const pendingWideWidth = useRef(0)
   /** Pointer capture keeps the resize gesture inside this component lifecycle. */
   const startWideResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (geometry.overlay || event.button !== 0) return
     event.preventDefault()
     resizePointerRef.current = event.pointerId
+    pendingWideWidth.current = 0
     event.currentTarget.setPointerCapture(event.pointerId)
   }
+  /**
+   * Drag the reader's inner edge.
+   *
+   * The width goes straight onto the fixed panel and only reaches React when
+   * the gesture ends: a state update per pointer event re-renders this whole
+   * viewer and relayouts every mounted page, which is what made the drag feel
+   * stuck. Pages therefore reflow once, when the gesture settles.
+   */
   const moveWideResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (resizePointerRef.current !== event.pointerId || geometry.overlay) return
-    const nextWidth = event.clientX - sidebarW
-    setWidePx(nextWidth)
-    props.onWideWidthChange(nextWidth)
+    const panel = widePanelRef.current
+    if (panel === null) return
+    const requested = event.clientX - frameMetrics.sidebar
+    const nextWidth = Math.round(Math.min(
+      Math.max(MIN_READER_WIDTH, requested),
+      Math.max(MIN_READER_WIDTH, viewportW - frameMetrics.sidebar - frameMetrics.rightbar - MIN_CONVERSATION_WIDTH),
+    ))
+    pendingWideWidth.current = nextWidth
+    panel.style.width = `${String(nextWidth)}px`
   }
   const finishWideResize = (event: ReactPointerEvent<HTMLDivElement>): void => {
-    if (resizePointerRef.current === event.pointerId) resizePointerRef.current = null
+    if (resizePointerRef.current !== event.pointerId) return
+    resizePointerRef.current = null
+    const nextWidth = pendingWideWidth.current
+    pendingWideWidth.current = 0
+    if (nextWidth === 0) return
+    setWidePx(nextWidth)
+    props.onWideWidthChange(nextWidth)
   }
 
   type CornerControl = 'navigation' | 'zoom'
@@ -3911,47 +3962,66 @@ export function PdfViewer(props: PdfViewerProps) {
     return () => { document.removeEventListener('pointerdown', closeOutside) }
   }, [fitMenuOpen])
 
-  // Measure the sidebar column (rail) width live: the panel docks after it.
-  // The frame is the only element with an inline grid-template-columns, and
-  // its first child is the sidebar column.
+  // Track the frame's columns live: the panel docks after the left column and
+  // must leave room for the right Sidebar's own column.
+  // Harness animates and drags those tracks. Feeding every intermediate width
+  // into PDF fit-scale makes a long page stack relayout on every frame, so only
+  // the settled layout is committed; in between, the fixed panel follows the
+  // left edge on the compositor.
   useLayoutEffect(() => {
     if (!wide) return
     const frame = document.querySelector<HTMLElement>('div[style*="grid-template-columns"]')
-    const sidebar = frame?.firstElementChild
-    if (!(sidebar instanceof HTMLElement)) return
-    // Harness animates its sidebar track. Feeding every intermediate width
-    // into PDF fit-scale makes a long page stack relayout on every frame. Only
-    // commit the final width after the ResizeObserver stream settles.
-    let latestWidth = sidebar.getBoundingClientRect().width
+    if (frame === null) return
+    let latest = readHarnessFrameMetrics()
     let settleTimer: number | undefined
+    const followEdge = (): void => {
+      if (pushed.current === null || widePanelRef.current === null) return
+      const delta = latest.sidebar - frameMetricsRef.current.sidebar
+      widePanelRef.current.style.willChange = 'transform'
+      widePanelRef.current.style.transform = Math.abs(delta) < 0.5
+        ? ''
+        : `translate3d(${String(delta)}px, 0, 0)`
+    }
     const measure = (): void => {
-      latestWidth = sidebar.getBoundingClientRect().width
-      // Moving only the fixed panel keeps it attached to the animated sidebar
-      // edge without changing PDF layout. A transform stays on the compositor;
-      // React receives only the settled width below, so PDF geometry never
-      // participates in each sidebar animation frame.
-      if (pushed.current !== null && widePanelRef.current !== null) {
-        const delta = latestWidth - sidebarWRef.current
-        widePanelRef.current.style.willChange = 'transform'
-        widePanelRef.current.style.transform = Math.abs(delta) < 0.5
-          ? ''
-          : `translate3d(${String(delta)}px, 0, 0)`
-      }
+      latest = readHarnessFrameMetrics()
+      followEdge()
       if (settleTimer !== undefined) clearTimeout(settleTimer)
       settleTimer = window.setTimeout(() => {
-        if (Math.abs(latestWidth - sidebarWRef.current) < 0.5) {
+        const current = frameMetricsRef.current
+        const unchanged = latest.sidebar === current.sidebar
+          && latest.rightbar === current.rightbar
+          && latest.drawer === current.drawer
+        if (unchanged) {
           if (widePanelRef.current !== null) {
             widePanelRef.current.style.transform = ''
             widePanelRef.current.style.willChange = ''
           }
-        } else {
-          setSidebarW(latestWidth)
+          return
         }
+        setFrameMetrics(latest)
       }, 80)
     }
-    measure()
     const observer = new ResizeObserver(measure)
-    observer.observe(sidebar)
+    observer.observe(frame)
+    // Tracks move without resizing the frame itself: collapsing either outer
+    // column rewrites the template, and a drawer leaves the sidebar at its
+    // width while the centre grows. The frame's children are what actually
+    // change size, so follow every one of them (the drawer mask included) and
+    // re-check on each measurement in case React swapped a child.
+    const observed = new Set<Element>()
+    const observeChildren = (): void => {
+      const current = new Set<Element>(frame.children)
+      for (const child of current) {
+        if (observed.has(child)) continue
+        observed.add(child)
+        observer.observe(child)
+      }
+    }
+    const tracked = (): void => {
+      observeChildren()
+      measure()
+    }
+    tracked()
     return () => {
       observer.disconnect()
       if (settleTimer !== undefined) clearTimeout(settleTimer)
@@ -3961,12 +4031,12 @@ export function PdfViewer(props: PdfViewerProps) {
   // Commit the final `left` and remove the temporary compositor offset in
   // the same pre-paint phase, so the handoff is visually continuous.
   useLayoutEffect(() => {
-    sidebarWRef.current = sidebarW
+    frameMetricsRef.current = frameMetrics
     if (widePanelRef.current !== null) {
       widePanelRef.current.style.transform = ''
       widePanelRef.current.style.willChange = ''
     }
-  }, [geometry.overlay, sidebarW])
+  }, [geometry.overlay, frameMetrics])
 
   // Capture the elements the wide mode restyles, restoring them on exit.
   const pushed = useRef<{
@@ -3984,13 +4054,21 @@ export function PdfViewer(props: PdfViewerProps) {
   // (and its drag handle) BACK to the left edge: final order is
   // [sidebar][pdf panel][conversation]. The frame is a block-level grid, so
   // the margin shrinks it and its own ResizeObserver reflows the columns.
+  //
+  // Capture and apply are ONE effect on purpose: the drawer flag can flip while
+  // the geometry does not, and a separate apply effect keyed on the geometry
+  // would leave the frame unpushed after the capture was re-established.
   useLayoutEffect(() => {
     if (!wide || geometry.overlay) return
     const frame = document.querySelector<HTMLElement>('div[style*="grid-template-columns"]')
     if (frame === null) return // degradation: overlay without reflow
-    const sidebar = frame.firstElementChild instanceof HTMLElement ? frame.firstElementChild : null
-    const handle = frame.querySelector<HTMLElement>('[data-side="sidebar"]')
-    pushed.current = {
+    // The sidebar is only a column to pull back when it owns a track. As a
+    // drawer it overlays the frame, and moving it would push it off screen.
+    const sidebar = frameMetrics.drawer
+      ? null
+      : frame.firstElementChild instanceof HTMLElement ? frame.firstElementChild : null
+    const handle = frameMetrics.drawer ? null : frame.querySelector<HTMLElement>('[data-side="sidebar"]')
+    const saved = {
       frame,
       margin: frame.style.marginLeft,
       overflow: frame.style.overflow,
@@ -4000,24 +4078,6 @@ export function PdfViewer(props: PdfViewerProps) {
       handle,
       handleTransform: handle?.style.transform ?? '',
     }
-    return () => {
-      const saved = pushed.current
-      pushed.current = null
-      if (saved === null) return
-      saved.frame.style.marginLeft = saved.margin
-      saved.frame.style.overflow = saved.overflow
-      if (saved.sidebar !== null) {
-        saved.sidebar.style.position = saved.sidebarPosition
-        saved.sidebar.style.left = saved.sidebarLeft
-      }
-      if (saved.handle !== null) saved.handle.style.transform = saved.handleTransform
-    }
-  }, [wide, geometry.overlay])
-
-  // (Re)apply the push geometry; runs after the capture effect above.
-  useLayoutEffect(() => {
-    const saved = pushed.current
-    if (!wide || geometry.overlay || saved === null) return
     saved.frame.style.marginLeft = `${String(panelW)}px`
     // The frame's overflow:hidden would clip the offset sidebar (it sits
     // outside the frame's border box) — unclip while wide.
@@ -4031,7 +4091,16 @@ export function PdfViewer(props: PdfViewerProps) {
       saved.sidebar.style.left = `-${String(panelW)}px`
     }
     if (saved.handle !== null) saved.handle.style.transform = `translateX(-${String(panelW)}px)`
-  }, [wide, geometry.overlay, panelW])
+    return () => {
+      saved.frame.style.marginLeft = saved.margin
+      saved.frame.style.overflow = saved.overflow
+      if (saved.sidebar !== null) {
+        saved.sidebar.style.position = saved.sidebarPosition
+        saved.sidebar.style.left = saved.sidebarLeft
+      }
+      if (saved.handle !== null) saved.handle.style.transform = saved.handleTransform
+    }
+  }, [wide, geometry.overlay, panelW, frameMetrics.drawer])
 
   // Document lifetime: load on mount, destroy on unmount; then measure page
   // 1 as the fallback size for unknown pages. Wider measured pages become the

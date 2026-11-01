@@ -10,23 +10,44 @@ import { MAX_CANVAS_DIMENSION } from '../src/limits.ts'
 import { hasPdfHeader } from '../src/pdf-format.ts'
 
 test('wide geometry preserves both minima when the viewport can fit them', () => {
-  assert.deepEqual(computeWideGeometry(1440, 280, 0), {
+  assert.deepEqual(computeWideGeometry(1440, 280, 0, 0), {
     overlay: false,
     left: 280,
     panelWidth: 638,
   })
-  assert.deepEqual(computeWideGeometry(800, 56, 999), {
+  assert.deepEqual(computeWideGeometry(800, 56, 0, 999), {
     overlay: false,
     left: 56,
     panelWidth: 384,
   })
 })
 
-test('wide geometry uses a full viewport overlay when two panes cannot fit', () => {
-  assert.deepEqual(computeWideGeometry(700, 56, 400), {
+test('wide geometry leaves the right Sidebar its track', () => {
+  // The reader docks between the sidebar and the conversation; the right
+  // Sidebar keeps its own column, so its width cannot be spent twice.
+  assert.deepEqual(computeWideGeometry(1440, 56, 346, 0), {
+    overlay: false,
+    left: 56,
+    panelWidth: 571,
+  })
+  assert.deepEqual(computeWideGeometry(1440, 56, 346, 900), {
+    overlay: false,
+    left: 56,
+    panelWidth: 678,
+  })
+})
+
+test('wide geometry covers the viewport when three tracks cannot fit', () => {
+  assert.deepEqual(computeWideGeometry(700, 56, 0, 400), {
     overlay: true,
     left: 0,
     panelWidth: 700,
+  })
+  // An expanded right Sidebar can leave too little room on its own.
+  assert.deepEqual(computeWideGeometry(1000, 56, 300, 0), {
+    overlay: true,
+    left: 0,
+    panelWidth: 1000,
   })
 })
 

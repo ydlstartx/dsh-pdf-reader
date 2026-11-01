@@ -153,6 +153,11 @@ export interface PdfPanelProps {
   onCitationRequest: (listener: (reference: PdfCitationReference) => boolean) => () => void
   /** Publish this session's live outline controller to the root sidebar. */
   onOutlineChange: (sessionId: SessionId, outline: PdfOutlineController | undefined) => void
+  /**
+   * Report the reader window opening or closing. The host column that carries
+   * this page gives up its width while the window is open.
+   */
+  onReaderWindowChange: (open: boolean) => void
   /** Toggle the root PDF search surface; returns whether it is open. */
   onSearchToggle: () => boolean
 }
@@ -355,6 +360,8 @@ export function PdfPanel(props: PdfPanelProps) {
   const indexPreparationAbortRef = useRef<AbortController | undefined>(undefined)
   const activeSessionIdRef = useRef(props.sessionId)
   activeSessionIdRef.current = props.sessionId
+  const onReaderWindowChangeRef = useRef(props.onReaderWindowChange)
+  onReaderWindowChangeRef.current = props.onReaderWindowChange
   const persistenceEnabledRef = useRef(false)
   const persistenceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -581,10 +588,11 @@ export function PdfPanel(props: PdfPanelProps) {
     setEvidenceImages(next)
   }, [])
 
-  /** One transition path keeps the reader window and the persisted state in sync. */
+  /** One transition path keeps the reader window, the host column, and the persisted state in sync. */
   const changeReaderOpen = useCallback((open: boolean) => {
     if (!open) setInitialViewerSessionState(viewerSessionStateRef.current)
     setReaderOpen(open)
+    onReaderWindowChangeRef.current(open)
   }, [])
 
   /** Serialize IndexedDB mutations so an explicit close always wins over older saves. */

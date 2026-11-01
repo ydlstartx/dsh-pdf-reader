@@ -96,6 +96,8 @@ interface PdfTabInjected {
   onCitationRequest: (listener: (reference: PdfCitationReference) => boolean) => () => void
   onOutlineChange: (sessionId: SessionId, controller: PdfOutlineController | undefined) => void
   onSearchToggle: () => boolean
+  /** Collapse the reading column while the reader window owns the screen. */
+  makeRoomForReaderWindow: () => void
 }
 
 /** The floating entry's injected face: the Session on screen plus the open verb. */
@@ -512,6 +514,11 @@ export function apply(ctx: Context): void {
         toggleOutline('search', sidebarWide)
         return outlineSnapshot.active === 'search'
       },
+      makeRoomForReaderWindow: () => {
+        // The page's own column is the width the reader window needs back: it
+        // hosted the details column before the right Sidebar replaced it.
+        if (ctx.sidebarRight.isExpanded()) ctx.sidebarRight.toggleExpanded()
+      },
     }),
   }, PdfTabPage)), 'dsh-pdf-reader.tab-body')
 
@@ -551,6 +558,9 @@ const PdfTabPage: SlotComponent<PropsRuntime<'sidebar.right.pane.tab'> & InjectF
     onCitationRequest: props.onCitationRequest,
     onOutlineChange: props.onOutlineChange,
     onSearchToggle: props.onSearchToggle,
+    onReaderWindowChange: (open: boolean) => {
+      if (open) props.makeRoomForReaderWindow()
+    },
   })
 }
 
