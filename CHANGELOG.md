@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+## [0.1.0-beta.4] - 2026-11-01
+
+### Changed
+
+- 兼容性基线升级到 DeepSeek Harness `0.2.2-alpha.2`：`dsh.client` 契约、`engines.dsh`、Node.js 24 与 pnpm 11.28
+- 阅读器改用右侧栏页签（`sidebar.right.pane.tab`）作为会话级宿主，浮动入口按右侧栏当前会话打开该页签；移除已删除的 `details` 插槽与 `ctx.layout.closeDetails()`
+- 会话与对话访问迁移到 `ctx.sessions` / 作用域对话服务；主输入框附件接口由 `addImages` 改为 `addAttachments`
+- 回答中的 `[图 N]` / `[文 N]` 回链改用对话行上的 `data-chat-turn` 定位来源批次，兼容折叠的过程分组
+- 浮动入口只要求右侧栏已有会话，不再要求会话属于某个工作区
+
+### Fixed
+
+- 插件 bundle 的浏览器平台模块清单与 Harness 0.2 的一致（只保留 `PLATFORM_MODULES` 中的模块），修复 `require` 命中失败导致的加载失败
+- `engines`/`peerDependencies` 与新运行时对齐，修复 profile 启动时因版本不满足而整包跳过的问题
+
 ## [0.1.0-beta.3] - 2026-08-22
 
 ### Added

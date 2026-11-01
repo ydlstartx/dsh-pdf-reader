@@ -73,6 +73,14 @@ const run = async () => {
     if (await demoSession.count() > 0) await demoSession.last().click()
     await page.waitForTimeout(700)
 
+    // The reader page is created by the floating entry; its hidden picker does
+    // not exist until that click.
+    const pdfFileInput = page.locator('input[type="file"][accept*=".pdf"]')
+    if (await pdfFileInput.count() === 0) {
+      await page.getByRole('button', { name: '显示或收起 PDF 阅读器', exact: true }).click()
+      await pdfFileInput.first().waitFor({ state: 'attached', timeout: 20_000 })
+    }
+
     await page.locator('input[type="file"]').setInputFiles(resolve(d2lPath))
     await page.waitForSelector('div[data-page="1"] canvas', { timeout: 20_000 })
     await page.waitForTimeout(1_000)

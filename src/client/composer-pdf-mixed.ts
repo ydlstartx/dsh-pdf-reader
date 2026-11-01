@@ -5,7 +5,7 @@
  * @module dsh-pdf-reader/client/composer-pdf-mixed
  */
 
-import type { SessionFace } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionFace } from '@deepseek-ai/dsh-api-session-controller/client'
 import { formatPdfImageSourceLabel } from './composer-pdf-image.ts'
 import type { PdfImageSource } from './composer-pdf-image.ts'
 import {

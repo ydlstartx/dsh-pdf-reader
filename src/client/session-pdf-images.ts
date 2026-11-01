@@ -1,6 +1,6 @@
 /** Official Harness SessionFace boundary for one browser-owned image turn. */
 
-import type { SessionFace } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionFace } from '@deepseek-ai/dsh-api-session-controller/client'
 
 function bytesToBase64(data: Uint8Array): string {
   let binary = ''

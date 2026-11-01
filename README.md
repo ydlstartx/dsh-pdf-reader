@@ -4,7 +4,7 @@
 
 DeepSeek Harness 的外部（out-of-tree）PDF 阅读器插件，把阅读、批注和 AI 分析放在同一个 Web 工作流中。它支持原生文字、图片区域、图文资料、多 PDF 联合提问和用户授权后的按需 OCR。
 
-> **发布状态：Beta。** 当前版本面向 DeepSeek Harness `0.1.1-rc.2`。建议先在非关键 PDF 副本上验证保存结果。
+> **发布状态：Beta。** 当前版本面向 DeepSeek Harness `0.2.2-alpha.2`。建议先在非关键 PDF 副本上验证保存结果。
 
 <p align="center">
   <img src="docs/images/readme/d2l-overview.png" alt="在 DeepSeek Harness 中阅读 Dive into Deep Learning 的 Transformer 架构页面" width="100%">
@@ -58,9 +58,9 @@ DeepSeek Harness 的外部（out-of-tree）PDF 阅读器插件，把阅读、批
 
 ## 运行要求
 
-- DeepSeek Harness `0.1.1-rc.2`
-- Node.js `^22.19.0` 或 `>=24.0.0`
-- pnpm `>=11`
+- DeepSeek Harness `0.2.2-alpha.2`
+- Node.js `>=24.9.0`
+- pnpm `>=11.28.5`
 - 支持 IndexedDB、Web Worker、Canvas 和 Blob URL 的现代 Chromium 浏览器
 - “覆盖原文件”需要 File System Access API；图片分析需要当前模型支持视觉输入；OCR 首次使用需要联网下载模型
 
@@ -69,7 +69,7 @@ DeepSeek Harness 的外部（out-of-tree）PDF 阅读器插件，把阅读、批
 推荐从 GitHub Releases 下载构建好的 `.tgz`，然后在 DeepSeek Harness checkout 根目录执行：
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.3.tgz
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.4.tgz
 pnpm dsh --profile web --dump-config | rg dsh-pdf-reader
 pnpm dsh web
 ```

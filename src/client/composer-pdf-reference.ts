@@ -7,7 +7,7 @@
  * @module dsh-pdf-reader/client/composer-pdf-reference
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context } from '@deepseek-ai/cordis'
 import type { IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PdfDocumentAiAccess } from '../pdf-ocr.ts'
 import { validPdfDocumentId } from '../pdf-document-index.ts'
@@ -366,7 +366,7 @@ export async function sendComposerPdfAnnotationAiRequest(
  */
 export function appendComposerPdfTextReference(
   conversation: IConversation,
-  scope: ClientContext,
+  scope: Context,
   reference: PdfTextReference,
 ): void {
   const input = conversation.input.for(scope)

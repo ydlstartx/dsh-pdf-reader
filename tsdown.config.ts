@@ -107,23 +107,30 @@ const browserNodeBuiltinStubs = {
   },
 }
 
-/** Browser platform modules the Web shell shares into its frozen module table. */
+/**
+ * Browser platform modules the Web shell seeds into its frozen module table
+ * (mirror of `PLATFORM_MODULES` in the running Harness `client/web`
+ * package). These are the only specifiers a dynamic bundle may `require()`
+ * from the table; every other module must inline.
+ */
 const PLATFORM_MODULES = [
   'react',
   'react/jsx-runtime',
   'react-dom',
   'react-dom/client',
   '@deepseek-ai/cordis',
+  'zod',
+  '@tanstack/react-virtual',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-ui-attachment',
-  '@deepseek-ai/dsh-client-schema-form',
+  '@deepseek-ai/dsh-client-ui-dockkit',
 ] as const
 
 /** Node-half externals: provided by the profile's installed dependency tree. */
 const HOST_EXTERNALS = [
   '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-attachment',
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-tools',
 ]
@@ -164,13 +171,22 @@ export default defineConfig([
     },
     // Anything not in the platform table must inline: a require() the frozen
     // module table cannot answer is a guaranteed runtime throw. pdfjs-dist
-    // therefore inlines into the bundle when the reader lands.
+    // therefore inlines into the bundle when the reader lands. (pdf.js also
+    // keeps a Node-only canvas factory behind its `isNodeJS` guard that calls
+    // `require("url")`; that guard is false in every browser, so the request
+    // stays in dead code and never reaches the module table.)
     plugins: [pdfjsWorkerRaw, pdfjsBinaryDataRaw],
     outputOptions: {
       entryFileNames: 'client.js',
-      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(ID)}, factory: (require) => {`,
+      // A lazy chunk registers under its own file name; the entry registers as
+      // the plugin id. The loader keys the module table by these strings.
+      banner: (chunk: { isEntry: boolean; fileName: string }): string => {
+        const identity = chunk.isEntry ? '' : `chunk: ${JSON.stringify(chunk.fileName)}, `
+        return `window.__ModuleLoader__.load({ id: ${JSON.stringify(ID)}, ${identity}factory: (require) => {`
+      },
       footer: 'return module.exports; } });',
       intro: 'var module = { exports: {} }; var exports = module.exports;',
+      chunkFileNames: 'client.[name].js',
     },
   },
   {

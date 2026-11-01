@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { SessionFace } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionFace } from '@deepseek-ai/dsh-api-session-controller/client'
 import {
   formatPdfImageAiPrompt,
   MAX_PDF_IMAGE_AI_QUESTION_CODE_UNITS,

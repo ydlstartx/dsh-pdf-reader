@@ -173,7 +173,7 @@ export function PdfToggle(props: PdfToggleProps) {
       noticeTimerRef.current = undefined
       setNotice(undefined)
     } else {
-      setNotice(result === 'workspace-required' ? '请先选择工作区' : '还没进入会话')
+      setNotice('还没进入会话，请先打开一个会话')
       noticeTimerRef.current = window.setTimeout(() => {
         noticeTimerRef.current = undefined
         setNotice(undefined)

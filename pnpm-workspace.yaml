@@ -3,17 +3,7 @@
 allowBuilds:
   protobufjs: false
 
-# Keep pnpm 11's default 24-hour supply-chain delay, while allowing the exact
-# Harness release reviewed for this compatibility update.
+# Keep pnpm 11's default 24-hour supply-chain delay. Every Harness package this
+# plugin pins has been published for longer than that, so no exemption is
+# needed; add one only for a release that must be adopted on day zero.
 minimumReleaseAge: 1440
-minimumReleaseAgeExclude:
-  - '@deepseek-ai/dsh-api-remotes@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-attachment@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-client-runtime@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-client-ui-conversation@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-client-ui-layout@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-client-ui-slots@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-host-webserver@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-llm@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-tools@0.1.1-rc.2'
-  - '@deepseek-ai/dsh-typert-protocol@0.1.1-rc.2'

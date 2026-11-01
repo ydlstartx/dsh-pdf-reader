@@ -762,13 +762,22 @@ function isPdfShortcutSpaceTarget(target: EventTarget | null): boolean {
     || target.closest('button, a[href], [role="button"], [role="link"]') !== null
 }
 
-/** Read the already-rendered Harness sidebar before a replacement viewer's first paint. */
+/**
+ * Read the already-rendered Harness sidebar before a replacement viewer's
+ * first paint.
+ *
+ * The frame's first grid track IS the sidebar column, so the resolved template
+ * answers the question for every layout revision: a wide column, a collapsed
+ * rail, and the drawer frame (track 0, sidebar overlaid) all read correctly.
+ * Measuring a child element does not — the frame's children are not ordered by
+ * column.
+ */
 function currentHarnessSidebarWidth(): number {
   if (typeof document === 'undefined') return 0
   const frame = document.querySelector<HTMLElement>('div[style*="grid-template-columns"]')
-  const sidebar = frame?.firstElementChild
-  if (!(sidebar instanceof HTMLElement)) return 0
-  const width = sidebar.getBoundingClientRect().width
+  if (frame === null) return 0
+  const track = getComputedStyle(frame).gridTemplateColumns.split(/\s+/u)[0] ?? ''
+  const width = Number.parseFloat(track)
   return Number.isFinite(width) && width > 0 ? width : 0
 }
 

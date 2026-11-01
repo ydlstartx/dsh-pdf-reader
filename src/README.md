@@ -12,14 +12,14 @@
 
 ## 浏览器侧
 
-- `client/index.ts`：浏览器入口，注册 Harness 插槽并连接主输入框
+- `client/index.ts`：浏览器入口，注册右侧栏 PDF 页签、左侧目录/搜索座位与浮动入口，并连接主输入框
 - `client/PdfPanel.tsx`：多文档标签、文件生命周期和阅读窗口
 - `client/PdfViewer.tsx`：pdf.js 页面渲染、选择、截图、缩放、旋转和虚拟化
 - `client/PdfOutlineSidebar.tsx`：目录、书签和搜索入口
 - `client/PdfAnnotationDrawer.tsx`：批注中心
 - `client/PdfEvidenceDrawer.tsx`：跨 PDF 图文资料及批量 AI 操作
 - `client/PdfThumbnailDrawer.tsx`：虚拟化缩略图导航
-- `client/PdfToggle.tsx`：打开或收起阅读器的浮动入口
+- `client/PdfToggle.tsx`：打开或收起阅读器的浮动入口（按右侧栏当前会话打开页签）
 
 ## 主要模块
 

@@ -1,6 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
-import type { GlobalStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+// The declaring package carries the two seats' owner shares into the composed
+// props, so a host change to them fails this build instead of drifting.
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import { visiblePdfOutlineItems } from './pdf-outline.ts'
 import type { PdfOutlineController } from './pdf-outline.ts'
 import {
@@ -9,23 +12,6 @@ import {
   pdfBookmarkDescendantIds,
 } from './pdf-bookmarks.ts'
 import { isBlankPdfSearchQuery, MAX_PDF_SEARCH_QUERY_LENGTH } from './pdf-search.ts'
-
-/** Local copies of the two ui-sidebar owner shares used by this plugin. */
-export interface SidebarSectionOwnerProps {
-  wide: boolean
-  expandSidebar: () => void
-}
-
-export interface SidebarFooterActionOwnerProps {
-  wide: boolean
-}
-
-declare module '@deepseek-ai/dsh-client-ui-slots' {
-  interface SlotMap {
-    'sidebar.workspaces': { kind: 'single'; scope: 'root'; owner: SidebarSectionOwnerProps }
-    'sidebar.footer.action': { kind: 'list'; scope: 'root'; owner: SidebarFooterActionOwnerProps }
-  }
-}
 
 export interface PdfOutlineSnapshot {
   controller: PdfOutlineController | undefined
@@ -39,7 +25,7 @@ export interface PdfOutlineSource {
   subscribe: (listener: () => void) => () => void
 }
 
-export type PdfOutlineFooterProps = GlobalStandardProps & SidebarFooterActionOwnerProps & {
+export type PdfOutlineFooterProps = PropsRuntime<'sidebar.footer.action'> & {
   source: PdfOutlineSource
   onToggle: (mode: PdfSidebarMode, wide: boolean) => void
   onWide: (wide: boolean) => void
@@ -1116,7 +1102,7 @@ export function PdfOutlinePanel(props: {
   )
 }
 
-export function PdfOutlineSidebar(props: GlobalStandardProps & SidebarSectionOwnerProps & {
+export function PdfOutlineSidebar(props: PropsRuntime<'sidebar.workspaces'> & {
   source: PdfOutlineSource
   onClose: () => void
 }) {

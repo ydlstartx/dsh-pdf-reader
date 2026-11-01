@@ -13,10 +13,10 @@
    git diff --check
    ```
 
-4. 推送分支，等待 `CI` 工作流在 Node 22.19 和 Node 24 上通过。
+4. 推送分支，等待 `CI` 工作流在 Node 24.9 和 Node 24 上通过。
 5. 手工触发一次 `Harness browser compatibility smoke`，确认插件可在受支持的 Harness 版本中加载并完成浏览器兼容回归。
 6. 手工触发一次 `Build release package`，确认正式构建和包内容检查通过。
-7. 在干净的 DeepSeek Harness `0.1.1-rc.2` profile 中安装工作流产物，完成阅读、批注、另存为、跨 PDF 图文提问和显式 OCR 授权的冒烟测试。
+7. 在干净的 DeepSeek Harness `0.2.2-alpha.2` profile 中安装工作流产物，完成阅读、批注、另存为、跨 PDF 图文提问和显式 OCR 授权的冒烟测试。
 
 ## 创建预发布版本
 

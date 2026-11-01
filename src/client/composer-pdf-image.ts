@@ -3,7 +3,7 @@
  * @module dsh-pdf-reader/client/composer-pdf-image
  */
 
-import type { SessionFace } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionFace } from '@deepseek-ai/dsh-api-session-controller/client'
 import { sendPdfImageTurn } from './session-pdf-images.ts'
 
 export type PdfImageAiAction = 'explain' | 'ocr' | 'translate' | 'question'

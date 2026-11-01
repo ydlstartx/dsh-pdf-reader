@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type { IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import {
   appendComposerPdfTextReference,

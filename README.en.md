@@ -4,7 +4,7 @@
 
 An out-of-tree PDF reader plugin for DeepSeek Harness that brings reading, annotation, and AI analysis into the same web workflow. It supports native text, image regions, mixed image-text evidence, multi-PDF questions, and user-authorized on-demand OCR.
 
-> **Release status: Beta.** This version targets DeepSeek Harness `0.1.1-rc.2`. Test save operations on non-critical copies of your PDFs first.
+> **Release status: Beta.** This version targets DeepSeek Harness `0.2.2-alpha.2`. Test save operations on non-critical copies of your PDFs first.
 
 <p align="center">
   <img src="docs/images/readme/d2l-overview.png" alt="Reading the Transformer architecture chapter of Dive into Deep Learning in DeepSeek Harness" width="100%">
@@ -58,9 +58,9 @@ See [src/README.md](src/README.md) for the source layout.
 
 ## Requirements
 
-- DeepSeek Harness `0.1.1-rc.2`
-- Node.js `^22.19.0` or `>=24.0.0`
-- pnpm `>=11`
+- DeepSeek Harness `0.2.2-alpha.2`
+- Node.js `>=24.9.0`
+- pnpm `>=11.28.5`
 - A modern Chromium browser with IndexedDB, Web Worker, Canvas, and Blob URL support
 - **Overwrite Original** requires the File System Access API; image analysis requires vision support from the active model; the first OCR run requires network access to download the model
 
@@ -69,7 +69,7 @@ See [src/README.md](src/README.md) for the source layout.
 Download the prebuilt `.tgz` from GitHub Releases, then run the following commands from the root of a DeepSeek Harness checkout:
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.3.tgz
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.4.tgz
 pnpm dsh --profile web --dump-config | rg dsh-pdf-reader
 pnpm dsh web
 ```

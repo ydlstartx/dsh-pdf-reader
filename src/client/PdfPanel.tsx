@@ -8,7 +8,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import { MAX_OPEN_PDF_BYTES, MAX_PDF_BYTES } from '../limits.ts'
 import { hasPdfHeader } from '../pdf-format.ts'
 import { PdfViewer } from './PdfViewer.tsx'
@@ -143,8 +143,6 @@ export interface PdfPanelProps {
   sendImageAiRequestFor: (sessionId: SessionId, images: readonly File[], request: PdfImageAiRequest) => Promise<void>
   /** Queue one image-region + native-text AI turn without consuming the composer draft. */
   sendMixedAiRequestFor: (sessionId: SessionId, images: readonly File[], request: PdfMixedAiRequest) => Promise<void>
-  /** Wide-mode lifecycle: close the details column on enter (exit keeps it closed). */
-  onWideChange: (open: boolean) => void
   /**
    * Subscribe to the floating PDF button's open requests. The panel answers
    * by opening the reader window, or by popping the file picker when no
@@ -357,8 +355,6 @@ export function PdfPanel(props: PdfPanelProps) {
   const indexPreparationAbortRef = useRef<AbortController | undefined>(undefined)
   const activeSessionIdRef = useRef(props.sessionId)
   activeSessionIdRef.current = props.sessionId
-  const onWideChangeRef = useRef(props.onWideChange)
-  onWideChangeRef.current = props.onWideChange
   const persistenceEnabledRef = useRef(false)
   const persistenceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve())
@@ -585,11 +581,10 @@ export function PdfPanel(props: PdfPanelProps) {
     setEvidenceImages(next)
   }, [])
 
-  /** One transition path keeps local visibility and Harness layout in sync. */
+  /** One transition path keeps the reader window and the persisted state in sync. */
   const changeReaderOpen = useCallback((open: boolean) => {
     if (!open) setInitialViewerSessionState(viewerSessionStateRef.current)
     setReaderOpen(open)
-    onWideChangeRef.current(open)
   }, [])
 
   /** Serialize IndexedDB mutations so an explicit close always wins over older saves. */

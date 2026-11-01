@@ -52,8 +52,8 @@ const run = async () => {
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' })
 
-  // Pick the first persisted session in the sidebar so the session-scoped
-  // details slot mounts. The first tree item is the workspace group itself.
+  // Pick the first persisted session in the sidebar so a Session is on
+  // screen. The first tree item is the workspace group itself.
   await page.waitForTimeout(2000)
   const sessionRows = page.getByRole('treeitem')
   if (await sessionRows.count() > 1) {
@@ -68,6 +68,14 @@ const run = async () => {
     await sessionRows.nth(persistedIndex).click()
   }
   await page.waitForTimeout(1500)
+
+  // The reader page is created by the floating entry, so the hidden picker
+  // exists only after opening it.
+  const pdfEntry = page.locator('button[aria-label*="PDF"], button[title*="PDF"]')
+  if (await page.locator('input[type="file"][accept*=".pdf"]').count() === 0) {
+    await pdfEntry.first().click()
+    await page.waitForTimeout(1500)
+  }
 
   // Feed the hidden native picker input directly; chooser dialogs are not
   // consistently emitted by every headless Chrome build.

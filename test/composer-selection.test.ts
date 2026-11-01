@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type {
   ComposerAttachment,
   DraftAttachmentId,
@@ -42,16 +43,16 @@ function fakeHarness(initialIds: readonly DraftAttachmentId[] = []): FakeHarness
     publish()
   }
   const input = {
-    addImages: (next: readonly DraftAttachmentId[]) => {
+    addAttachments: (next: readonly DraftAttachmentId[]) => {
       if (admission === 'throw') throw new Error('input unavailable')
       if (admission === 'refuse') return false
       imageIds = [...imageIds, ...next]
       publish()
       return true
     },
-    removeImage: remove,
+    removeAttachment: remove,
     state: {
-      getSnapshot: () => ({ draft, imageIds }),
+      getSnapshot: () => ({ draft, attachmentIds: imageIds }),
       subscribe: (listener: () => void) => {
         subscribers.add(listener)
         return () => { subscribers.delete(listener) }
@@ -60,7 +61,7 @@ function fakeHarness(initialIds: readonly DraftAttachmentId[] = []): FakeHarness
   }
   const conversation = {
     input: { for: () => input },
-    createDraftImages: (files: readonly File[]) => files.map((file) => {
+    createDrafts: (_sessionId: SessionId, files: readonly File[]) => files.map((file) => {
       const attachmentId = id(`pdf-crop-${String(++attachmentSequence)}`)
       const attachment: ComposerAttachment = {
         kind: 'image',
@@ -71,11 +72,11 @@ function fakeHarness(initialIds: readonly DraftAttachmentId[] = []): FakeHarness
       attachments.set(attachmentId, attachment)
       return attachment
     }),
-    draftImages: (ids: readonly DraftAttachmentId[]) => ids.flatMap(attachmentId => {
+    resolveDraftAttachments: (ids: readonly DraftAttachmentId[]) => ids.flatMap(attachmentId => {
       const attachment = attachments.get(attachmentId)
       return attachment === undefined ? [] : [attachment]
     }),
-    releaseDraftImage: (releasedId: DraftAttachmentId) => {
+    releaseDraftAttachment: (releasedId: DraftAttachmentId) => {
       released.push(releasedId)
       attachments.delete(releasedId)
     },
@@ -91,6 +92,7 @@ function fakeHarness(initialIds: readonly DraftAttachmentId[] = []): FakeHarness
 }
 
 const scope = {} as ClientContext
+const sessionId = 'session-1' as SessionId
 const crop = (): File => new File(['crop'], 'crop.png', { type: 'image/png' })
 const limits = (overrides: Partial<ComposerImageLimits> = {}): ComposerImageLimits => ({
   maxImageBytes: 100,
@@ -104,7 +106,7 @@ test('attaching a crop preserves the text draft and existing attachments', () =>
   const foreignId = id('user-image')
   const harness = fakeHarness([foreignId])
 
-  attachComposerSelection(harness.conversation, scope, crop(), limits())
+  attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
 
   assert.equal(harness.draft(), '用户已经输入的问题')
   assert.deepEqual(harness.imageIds(), [foreignId, id('pdf-crop-1')])
@@ -116,7 +118,7 @@ test('admission refusal and exception both release the created crop', () => {
     const harness = fakeHarness()
     harness.setAdmission(admission)
 
-    assert.throws(() => attachComposerSelection(harness.conversation, scope, crop(), limits()))
+    assert.throws(() => attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits()))
     assert.deepEqual(harness.imageIds(), [])
     assert.deepEqual(harness.released, [id('pdf-crop-1')])
   }
@@ -125,7 +127,7 @@ test('admission refusal and exception both release the created crop', () => {
 test('release is idempotent and removes only the plugin attachment', () => {
   const foreignId = id('user-image')
   const harness = fakeHarness([foreignId])
-  const handle = attachComposerSelection(harness.conversation, scope, crop(), limits())
+  const handle = attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
 
   handle.release()
   handle.release()
@@ -136,7 +138,7 @@ test('release is idempotent and removes only the plugin attachment', () => {
 
 test('external removal is observed once, including removal before subscription', () => {
   const harness = fakeHarness()
-  const handle = attachComposerSelection(harness.conversation, scope, crop(), limits())
+  const handle = attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
   let notifications = 0
   const unsubscribe = handle.onRemoved(() => { notifications += 1 })
 
@@ -146,7 +148,7 @@ test('external removal is observed once, including removal before subscription',
   assert.equal(notifications, 1)
 
   const second = fakeHarness()
-  const lateHandle = attachComposerSelection(second.conversation, scope, crop(), limits())
+  const lateHandle = attachComposerSelection(second.conversation, scope, sessionId, crop(), limits())
   second.remove(id('pdf-crop-1'))
   lateHandle.onRemoved(() => { notifications += 1 })()
   assert.equal(notifications, 2)
@@ -158,6 +160,7 @@ test('compatibility and PNG checks fail before mutating composer state', () => {
     () => attachComposerSelection(
       harness.conversation,
       scope,
+      sessionId,
       new File(['x'], 'x.jpg', { type: 'image/jpeg' }),
       limits(),
     ),
@@ -167,7 +170,7 @@ test('compatibility and PNG checks fail before mutating composer state', () => {
 
   const outwardOnly = { input: harness.conversation.input } as IConversation
   assert.throws(
-    () => attachComposerSelection(outwardOnly, scope, crop(), limits()),
+    () => attachComposerSelection(outwardOnly, scope, sessionId, crop(), limits()),
     /未开放主输入框图片草稿能力/,
   )
   assert.deepEqual(harness.imageIds(), [])
@@ -181,6 +184,7 @@ test('host image count and byte limits reject only the new crop', () => {
     () => attachComposerSelection(
       countHarness.conversation,
       scope,
+      sessionId,
       crop(),
       limits({ maxImagesPerMessage: 2 }),
     ),
@@ -194,6 +198,7 @@ test('host image count and byte limits reject only the new crop', () => {
     () => attachComposerSelection(
       bytesHarness.conversation,
       scope,
+      sessionId,
       crop(),
       limits({ maxMessageImageBytes: 7 }),
     ),
@@ -207,6 +212,7 @@ test('host image count and byte limits reject only the new crop', () => {
     () => attachComposerSelection(
       singleHarness.conversation,
       scope,
+      sessionId,
       crop(),
       limits({ maxImageBytes: 3 }),
     ),
@@ -217,16 +223,16 @@ test('host image count and byte limits reject only the new crop', () => {
 
 test('successive crops append in order', () => {
   const harness = fakeHarness()
-  attachComposerSelection(harness.conversation, scope, crop(), limits())
-  attachComposerSelection(harness.conversation, scope, crop(), limits())
+  attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
+  attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
   assert.deepEqual(harness.imageIds(), [id('pdf-crop-1'), id('pdf-crop-2')])
 })
 
 test('releasing a middle crop preserves both sibling attachments and their order', () => {
   const harness = fakeHarness()
-  attachComposerSelection(harness.conversation, scope, crop(), limits())
-  const middle = attachComposerSelection(harness.conversation, scope, crop(), limits())
-  attachComposerSelection(harness.conversation, scope, crop(), limits())
+  attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
+  const middle = attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
+  attachComposerSelection(harness.conversation, scope, sessionId, crop(), limits())
 
   middle.release()
 

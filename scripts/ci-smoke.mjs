@@ -43,21 +43,47 @@ const acknowledgeHarnessWelcome = async () => {
   await continueButton.waitFor({ state: 'hidden', timeout: 15_000 })
 }
 
-/** PDF rendering needs no model credential, so use Harness's supported defer action. */
+/**
+ * PDF rendering needs no model credential, so use Harness's supported defer
+ * action. A profile that never finished onboarding shows the "get started"
+ * modal instead, which offers no defer button — close it through its own ✕.
+ */
 const deferHarnessProviderSetup = async () => {
   const configureLaterButton = page.getByRole('button', { name: /^(?:Configure later|稍后配置)$/ })
-  const visible = await configureLaterButton.waitFor({ state: 'visible', timeout: 10_000 }).then(
+  const deferred = await configureLaterButton.waitFor({ state: 'visible', timeout: 10_000 }).then(
     () => true,
     () => false,
   )
-  if (!visible) return
-  await configureLaterButton.click()
-  await configureLaterButton.waitFor({ state: 'hidden', timeout: 15_000 })
+  if (deferred) {
+    await configureLaterButton.click()
+    await configureLaterButton.waitFor({ state: 'hidden', timeout: 15_000 })
+    return
+  }
+  const closeButton = page.getByRole('button', { name: /^(?:Close|关闭)$/ })
+  if (await closeButton.count() === 0) return
+  if (!await closeButton.first().isVisible().catch(() => false)) return
+  await closeButton.first().click()
+  await page.waitForTimeout(500)
 }
 
-/** A fresh CI profile has no Workspace, so no session-scoped PDF panel exists yet. */
+/**
+ * Open the reader page for the Session on screen. The page lives in the right
+ * Sidebar and is created by the floating entry, so the PDF file input only
+ * exists after that click.
+ */
+const openReaderPage = async () => {
+  if (await waitForPicker(1_500)) return
+  const pill = page.locator('button[aria-label*="PDF"], button[title*="PDF"]')
+  await pill.first().waitFor({ state: 'visible', timeout: 15_000 })
+  await pill.first().click()
+  if (!await waitForPicker(20_000)) {
+    throw new Error('PDF reader page did not open from the floating entry')
+  }
+}
+
+/** A fresh CI profile has no Workspace, so no Session is on screen yet. */
 const ensureWorkspaceSession = async () => {
-  if (await waitForPicker(3_000)) return
+  if (await page.getByRole('treeitem').count() > 0) return
 
   const chooseWorkspace = page.getByRole('button', { name: /^(?:Choose workspace|选择工作区)$/ })
   await chooseWorkspace.first().waitFor({ state: 'visible', timeout: 15_000 })
@@ -75,9 +101,7 @@ const ensureWorkspaceSession = async () => {
   await openDirectory.waitFor({ state: 'visible', timeout: 15_000 })
   await openDirectory.click()
 
-  if (!await waitForPicker(20_000)) {
-    throw new Error('PDF reader did not mount after selecting the smoke-test Workspace')
-  }
+  await page.waitForTimeout(4_000)
 }
 
 try {
@@ -90,6 +114,7 @@ try {
   if (await sessionRows.count() > 1) await sessionRows.nth(1).click()
 
   await ensureWorkspaceSession()
+  await openReaderPage()
   await picker.setInputFiles(pdfPath)
   await page.waitForSelector('div[data-page="1"] canvas', { timeout: 20_000 })
   await page.waitForFunction(() => {
@@ -125,6 +150,7 @@ try {
     url: page.url(),
     pageErrors,
     pdfPickerCount: await picker.count(),
+    pdfEntryCount: await page.locator('button[aria-label*="PDF"], button[title*="PDF"]').count(),
     workspaceChooserCount: await page.getByRole('button', { name: /^(?:Choose workspace|选择工作区)$/ }).count(),
     welcomeContinueCount: await page.getByRole('button', { name: /^(?:Continue|继续)$/ }).count(),
     configureLaterCount: await page.getByRole('button', { name: /^(?:Configure later|稍后配置)$/ }).count(),

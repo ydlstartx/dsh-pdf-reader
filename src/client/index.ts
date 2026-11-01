@@ -1,25 +1,34 @@
 /**
- * dsh-pdf-reader browser half: register the PDF reader into the Web GUI's
- * right-hand `details` slot (declared by ui-layout) via priority shadowing —
- * the column is only the invisible session-scope host — plus a frame-wide
- * draggable floating button (the additive `shell.overlay` seat) that opens
- * the reader window. Documents arrive exclusively through the user's own
- * file picker. Raw PDF bytes remain browser-local; a bounded derived-text
- * index is synchronized to session-local host tools. Type-only runtime/layout/conversation
- * imports load the declare merges that type the slot key and host services;
- * nothing here is a value import beyond the platform module table, so the
- * bundle stays pure.
+ * dsh-pdf-reader browser half: register the PDF reader as a page tab type in
+ * the Web GUI's right Sidebar (`ctx.sidebarRightTabs` + the keyed
+ * `sidebar.right.pane.tab` seat), a frame-wide draggable floating entry
+ * (`shell.overlay`) that opens that tab, and the outline/search surface that
+ * shadows the left column's workspace browser while a reader is open.
+ * Documents arrive exclusively through the user's own file picker. Raw PDF
+ * bytes remain browser-local; a bounded derived-text index is synchronized to
+ * session-local host tools. Every import of another client package is
+ * type-only: behavior crosses packages through Cordis services, UI through
+ * slots.
  * @module dsh-pdf-reader/client
  */
 
 import { createElement } from 'react'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ClientContext, ISessions } from '@deepseek-ai/dsh-client-runtime/client'
+import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
+// Declaration merges for the services and standard props this plugin's apply
+// world reads. Every one of them is type-only and erased at build time.
+import type { AgentContext, ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type { IConversation } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-import type { GlobalStandardProps, SessionStandardProps } from '@deepseek-ai/dsh-client-ui-slots'
-import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import type { SessionId } from '@deepseek-ai/dsh-api-remotes/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
+import type { InjectFace, PropsRuntime, SlotComponent } from '@deepseek-ai/dsh-client-ui-slots'
 import { attachComposerSelection } from './composer-selection.ts'
 import type { ComposerImageLimits, ComposerSelectionHandle } from './composer-selection.ts'
 import {
@@ -54,8 +63,6 @@ import type {
   PdfOutlineSnapshot,
   PdfOutlineSource,
   PdfSidebarMode,
-  SidebarFooterActionOwnerProps,
-  SidebarSectionOwnerProps,
 } from './PdfOutlineSidebar.tsx'
 import type { PdfOutlineController } from './pdf-outline.ts'
 import { resolvePdfToggleResult } from './workspace-gate.ts'
@@ -63,14 +70,48 @@ import { resolvePdfToggleResult } from './workspace-gate.ts'
 export const name = 'dsh-pdf-reader-client'
 
 /** Services required before the browser plugin loads. */
-export const inject = ['slots', 'layout', 'sessions', 'conversation']
+export const inject = ['slots', 'layout', 'sessions', 'conversation', 'sidebarRight', 'sidebarRightTabs']
+
+/**
+ * Tab-type implementation id (the key the body registers under) and the page
+ * kind the floating button opens. One reader page per Session pane.
+ */
+const PDF_TAB_ID = 'dsh-pdf-reader'
+const PDF_TAB_KIND = 'dsh-pdf-reader'
+
+/** Callbacks one reader page needs, bound to the page's Session at inject time. */
+interface PdfTabInjected {
+  attachSelectionFor: (
+    sessionId: SessionId,
+    file: File,
+    limits: ComposerImageLimits | undefined,
+  ) => ComposerSelectionHandle
+  appendTextReferenceFor: (sessionId: SessionId, reference: PdfTextReference) => void
+  sendDocumentsQuestionFor: (sessionId: SessionId, request: PdfDocumentsAiRequest) => Promise<void>
+  sendTextAiRequestFor: (sessionId: SessionId, request: PdfAiRequest) => Promise<void>
+  sendAnnotationAiRequestFor: (sessionId: SessionId, request: PdfAnnotationAiRequest) => Promise<void>
+  sendImageAiRequestFor: (sessionId: SessionId, images: readonly File[], request: PdfImageAiRequest) => Promise<void>
+  sendMixedAiRequestFor: (sessionId: SessionId, images: readonly File[], request: PdfMixedAiRequest) => Promise<void>
+  onOpenRequest: (listener: () => void) => () => void
+  onCitationRequest: (listener: (reference: PdfCitationReference) => boolean) => () => void
+  onOutlineChange: (sessionId: SessionId, controller: PdfOutlineController | undefined) => void
+  onSearchToggle: () => boolean
+}
+
+/** The floating entry's injected face: the Session on screen plus the open verb. */
+interface PdfToggleInjected {
+  /** The Session the right Sidebar shows, or absent while none is on screen. */
+  readonly hooks: { readonly mounted: ObservableSnapshot<SessionId | undefined> }
+  openReader: () => void
+}
 
 export function apply(ctx: Context): void {
-  // Keep this plugin compatible with the runtime's outward session contract
-  // even when another client package exposes the same service under its
-  // concrete `SessionStore` name in declaration output.
-  const runtimeSessions = ctx.sessions as unknown as Pick<ISessions, 'scope' | 'binding'>
-  const sessionScope = (sessionId: SessionId): ClientContext | undefined => runtimeSessions.scope(sessionId)
+  // The host half of this package compiles in the same program, so the Host
+  // Session store's declaration merge can win over the Client one. The outward
+  // Client contract is what the browser actually holds; keep that cast here,
+  // in the plugin's single boundary, rather than sprinkling `as` everywhere.
+  const sessions = ctx.sessions as unknown as ISessions
+
   // Root PDF-navigation state has one owner: the currently rendered session
   // panel. One active mode (outline or search) temporarily shadows the
   // workspace browser; closing it reveals Harness's original content.
@@ -99,7 +140,7 @@ export function apply(ctx: Context): void {
       disposeOutlineSeat = ctx.slots.register({
         name: 'sidebar.workspaces',
         priority: -1,
-      }, (props: GlobalStandardProps & SidebarSectionOwnerProps) => createElement(PdfOutlineSidebar, {
+      }, (props: PropsRuntime<'sidebar.workspaces'>) => createElement(PdfOutlineSidebar, {
         ...props,
         source: outlineSource,
         onClose: closeOutline,
@@ -176,7 +217,7 @@ export function apply(ctx: Context): void {
     syncOutlineSeat()
   }
 
-  ctx.slots.inject('sidebar.workspaces', () => {
+  ctx.effect(() => ctx.slots.inject('sidebar.workspaces', () => {
     sidebarDeclared = true
     syncOutlineSeat()
     return () => {
@@ -185,8 +226,9 @@ export function apply(ctx: Context): void {
       disposeOutlineSeat = undefined
       dispose?.()
     }
-  })
-  ctx.slots.inject('sidebar.footer.action', () => {
+  }), 'dsh-pdf-reader.outline-seat')
+
+  ctx.effect(() => ctx.slots.inject('sidebar.footer.action', () => {
     // The host lays footer registrations out horizontally. Keep the two PDF
     // actions in one additive cell so their intended vertical order remains
     // stable: search above outline, without taking over any host-owned action.
@@ -194,21 +236,42 @@ export function apply(ctx: Context): void {
       name: 'sidebar.footer.action',
       id: 'dsh-pdf-reader-outline',
       order: 100,
-    }, (props: GlobalStandardProps & SidebarFooterActionOwnerProps) => createElement(PdfOutlineFooter, {
+    }, (props: PropsRuntime<'sidebar.footer.action'>) => createElement(PdfOutlineFooter, {
       ...props,
       source: outlineSource,
       onToggle: toggleOutline,
       onWide: updateSidebarWide,
     }))
-  })
+  }), 'dsh-pdf-reader.outline-footer')
 
-  // The floating PDF button and the details-column panel talk through this
-  // tiny bus: the button fires open requests, and the session-scoped panel
-  // toggles its loaded reader or invokes its hidden file input when empty.
+  // The floating PDF button and the reader page talk through this tiny bus:
+  // the button fires open requests, and the session-scoped page toggles its
+  // loaded reader or invokes its hidden file input when empty.
   const openListeners = new Set<() => void>()
+  // The first click can arrive before the page exists (the tab is created by
+  // that click); the page claims this flag as it subscribes.
+  let pendingOpenRequest = false
+  const dispatchOpen = (): void => {
+    for (const listener of openListeners) listener()
+  }
   const onOpenRequest = (listener: () => void): (() => void) => {
     openListeners.add(listener)
+    if (pendingOpenRequest) {
+      pendingOpenRequest = false
+      // Deliver the click that created this page to whichever listener is
+      // live once this subscription's own render settles: the panel
+      // re-subscribes as its reader state changes, so the listener that
+      // claimed the flag may already be retired.
+      queueMicrotask(dispatchOpen)
+    }
     return () => { openListeners.delete(listener) }
+  }
+  const requestOpen = (): void => {
+    if (openListeners.size === 0) {
+      pendingOpenRequest = true
+      return
+    }
+    dispatchOpen()
   }
 
   // Assistant Markdown safely renders the citation sentinel as HTTPS. Some
@@ -225,6 +288,43 @@ export function apply(ctx: Context): void {
       caretRangeFromPoint: (x: number, y: number) => Range | null
     }>
 
+    /** Turn index carried by a chat row; the transcript's own ordering key. */
+    const chatTurnOf = (element: Element | null): number | undefined => {
+      const raw = element?.getAttribute('data-chat-turn')
+      if (raw === undefined || raw === null || raw === '') return undefined
+      const value = Number(raw)
+      return Number.isSafeInteger(value) ? value : undefined
+    }
+
+    /**
+     * Recover the PDF citation batch of one assistant row.
+     *
+     * The transcript can fold a completed turn into a process group, so an
+     * assistant row is not necessarily a sibling of its user prompt. Read the
+     * row's turn instead and take the last user prompt at or before it; fall
+     * back to document order for transcripts without turn markers.
+     */
+    const citationBatchFor = (assistant: Element): string | undefined => {
+      const assistantTurn = chatTurnOf(assistant)
+      const flow = assistant.closest('[data-chat-flow]')
+      if (assistantTurn !== undefined && flow !== null) {
+        let bestPrompt: Element | undefined
+        let bestTurn = Number.NEGATIVE_INFINITY
+        for (const prompt of flow.querySelectorAll('[data-chat-flow-kind="user"]')) {
+          const turn = chatTurnOf(prompt)
+          if (turn === undefined || turn > assistantTurn || turn < bestTurn) continue
+          bestPrompt = prompt
+          bestTurn = turn
+        }
+        if (bestPrompt !== undefined) return parsePdfCitationBatchId(bestPrompt.textContent ?? '')
+      }
+      let prompt = assistant.previousElementSibling
+      while (prompt !== null && prompt.getAttribute('data-chat-flow-kind') !== 'user') {
+        prompt = prompt.previousElementSibling
+      }
+      return prompt === null ? undefined : parsePdfCitationBatchId(prompt.textContent ?? '')
+    }
+
     const plainCitationAt = (event: MouseEvent): PdfCitationReference | undefined => {
       const target = event.target
       if (!(target instanceof Element)) return undefined
@@ -236,11 +336,7 @@ export function apply(ctx: Context): void {
       const assistant = target.closest('[data-chat-flow-kind="assistant-step"]')
       if (assistant === null) return undefined
 
-      let prompt = assistant.previousElementSibling
-      while (prompt !== null && prompt.getAttribute('data-chat-flow-kind') !== 'user') {
-        prompt = prompt.previousElementSibling
-      }
-      const batchId = prompt === null ? undefined : parsePdfCitationBatchId(prompt.textContent ?? '')
+      const batchId = citationBatchFor(assistant)
       if (batchId === undefined) return undefined
 
       const caretDocument = document as CaretDocument
@@ -305,7 +401,23 @@ export function apply(ctx: Context): void {
       document.removeEventListener('click', handleCitationClick, true)
       document.removeEventListener('mousemove', handleCitationHover, true)
     }
-  })
+  }, 'dsh-pdf-reader.citation-links')
+
+  /**
+   * Resolve one Session's live browser scope. `scope()` borrows the already
+   * retained generation, so a page rendered for that Session always has one
+   * while it is on screen.
+   */
+  const sessionScopeOf = (sessionId: SessionId): AgentContext | undefined => sessions.scope(sessionId)
+
+  /** The scope-addressed conversation face for one Session. */
+  const conversationFor = (sessionId: SessionId): IConversation => {
+    const scoped = sessionScopeOf(sessionId)
+    if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
+    const conversation = scoped.get('conversation')
+    if (conversation === undefined) throw new Error('当前会话的 AI 对话服务不可用')
+    return conversation
+  }
 
   /** Resolve the session scope, then hand the version-sensitive work to its sole boundary. */
   const attachSelectionFor = (
@@ -313,16 +425,16 @@ export function apply(ctx: Context): void {
     file: File,
     limits: ComposerImageLimits | undefined,
   ): ComposerSelectionHandle => {
-    const scoped = sessionScope(sessionId)
+    const scoped = sessionScopeOf(sessionId)
     if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
-    return attachComposerSelection(ctx.conversation, scoped, file, limits)
+    return attachComposerSelection(conversationFor(sessionId), scoped, sessionId, file, limits)
   }
 
   /** Add source-labelled PDF text to the editable draft without sending it. */
   const appendTextReferenceFor = (sessionId: SessionId, reference: PdfTextReference): void => {
-    const scoped = sessionScope(sessionId)
+    const scoped = sessionScopeOf(sessionId)
     if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
-    appendComposerPdfTextReference(ctx.conversation, scoped, reference)
+    appendComposerPdfTextReference(conversationFor(sessionId), scoped, reference)
   }
 
   /** Send one confirmed whole-document question without occupying the main draft. */
@@ -330,20 +442,12 @@ export function apply(ctx: Context): void {
     sessionId: SessionId,
     request: PdfDocumentsAiRequest,
   ): Promise<void> => {
-    const scoped = sessionScope(sessionId)
-    if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
-    const conversation = scoped.get('conversation')
-    if (conversation === undefined) throw new Error('当前会话的 AI 对话服务不可用')
-    await sendComposerPdfDocumentsAiRequest(conversation, request)
+    await sendComposerPdfDocumentsAiRequest(conversationFor(sessionId), request)
   }
 
   /** Queue an explicit PDF AI action through the session-scoped conversation. */
   const sendTextAiRequestFor = async (sessionId: SessionId, request: PdfAiRequest): Promise<void> => {
-    const scoped = sessionScope(sessionId)
-    if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
-    const conversation = scoped.get('conversation')
-    if (conversation === undefined) throw new Error('当前会话的 AI 对话服务不可用')
-    await sendComposerPdfAiRequest(conversation, request)
+    await sendComposerPdfAiRequest(conversationFor(sessionId), request)
   }
 
   /** Queue an explicit annotation-set AI action through the same session conversation. */
@@ -351,11 +455,7 @@ export function apply(ctx: Context): void {
     sessionId: SessionId,
     request: PdfAnnotationAiRequest,
   ): Promise<void> => {
-    const scoped = sessionScope(sessionId)
-    if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
-    const conversation = scoped.get('conversation')
-    if (conversation === undefined) throw new Error('当前会话的 AI 对话服务不可用')
-    await sendComposerPdfAnnotationAiRequest(conversation, request)
+    await sendComposerPdfAnnotationAiRequest(conversationFor(sessionId), request)
   }
 
   /** Queue an explicit PDF image-region AI action without consuming composer state. */
@@ -364,9 +464,7 @@ export function apply(ctx: Context): void {
     images: readonly File[],
     request: PdfImageAiRequest,
   ): Promise<void> => {
-    const scoped = sessionScope(sessionId)
-    if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
-    const session = runtimeSessions.binding(sessionId)?.session
+    const session = sessions.binding(sessionId)?.session
     if (session === undefined) throw new Error('当前会话的 AI 对话服务不可用')
     await sendComposerPdfImageAiRequest(session, images, request)
   }
@@ -377,58 +475,96 @@ export function apply(ctx: Context): void {
     images: readonly File[],
     request: PdfMixedAiRequest,
   ): Promise<void> => {
-    const scoped = sessionScope(sessionId)
-    if (scoped === undefined) throw new Error('当前会话不可用，请先在会话中打开阅读器')
-    const session = runtimeSessions.binding(sessionId)?.session
+    const session = sessions.binding(sessionId)?.session
     if (session === undefined) throw new Error('当前会话的 AI 对话服务不可用')
     await sendComposerPdfMixedAiRequest(session, images, request)
   }
 
-  // Single seat: shadow the shipped DetailsPanel via priority — a single
-  // slot renders its LOWEST-priority registration, and the shipped panel
-  // sits at the default 0. Unloading hands the seat back.
-  ctx.slots.register({
-    name: 'details',
-    priority: -1,
-  }, (props: SessionStandardProps) => createElement(PdfPanel, {
-    sessionId: props.sessionId,
-    imageLimits: props.useProjection('imageLimits'),
-    attachSelectionFor,
-    appendTextReferenceFor,
-    sendDocumentsQuestionFor,
-    sendTextAiRequestFor,
-    sendAnnotationAiRequestFor,
-    sendImageAiRequestFor,
-    sendMixedAiRequestFor,
-    onClose: () => { ctx.layout.closeDetails() },
-    // The reader window owns the screen while open; make sure the details
-    // column (the invisible host) is tucked away. Closing the window does
-    // NOT reopen the column — the floating button is the reader's entry.
-    onWideChange: (open: boolean) => { if (open) ctx.layout.closeDetails() },
-    onOpenRequest: onOpenRequest,
-    onCitationRequest,
-    onOutlineChange: publishOutline,
-    onSearchToggle: () => {
-      toggleOutline('search', sidebarWide)
-      return outlineSnapshot.active === 'search'
-    },
-  }))
+  // The page type itself. `keepMounted` preserves the loaded documents, the
+  // render cache, and unsaved annotations while the column is collapsed or
+  // another Session is on screen.
+  ctx.effect(() => ctx.sidebarRightTabs.register({
+    id: PDF_TAB_ID,
+    kind: PDF_TAB_KIND,
+    keepMounted: true,
+    title: () => 'PDF 阅读器',
+  }), 'dsh-pdf-reader.tab-type')
 
-  // List seat: the additive floating entry. In a selected Workspace, one click
-  // invokes the picker when empty or toggles the reader without discarding its view.
-  ctx.slots.register({
+  // Page body: one reader per Session, served by the keyed tab seat.
+  ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+    name: 'sidebar.right.pane.tab',
+    key: PDF_TAB_ID,
+    // Every callback below takes the Session explicitly from the page's own
+    // props, so a page that outlives a session switch can never act on the
+    // wrong one; the seat's session id is therefore not read here.
+    inject: (_sessionId: SessionId): PdfTabInjected => ({
+      attachSelectionFor,
+      appendTextReferenceFor,
+      sendDocumentsQuestionFor,
+      sendTextAiRequestFor,
+      sendAnnotationAiRequestFor,
+      sendImageAiRequestFor,
+      sendMixedAiRequestFor,
+      onOpenRequest,
+      onCitationRequest,
+      onOutlineChange: publishOutline,
+      onSearchToggle: () => {
+        toggleOutline('search', sidebarWide)
+        return outlineSnapshot.active === 'search'
+      },
+    }),
+  }, PdfTabPage)), 'dsh-pdf-reader.tab-body')
+
+  // Frame-wide floating entry: opens the reader page for the Session on screen.
+  ctx.effect(() => ctx.slots.inject('shell.overlay', () => ctx.slots.register({
     name: 'shell.overlay',
     id: 'dsh-pdf-reader-toggle',
-  }, (props: GlobalStandardProps) => {
-    const currentSessionId = props.useSessions(state => state.current)
-    const workspaces = props.useWorkspaces(state => state.items)
-    return createElement(PdfToggle, {
-      onToggle: () => {
-        const result = resolvePdfToggleResult(currentSessionId, workspaces, openListeners.size > 0)
-        if (result !== 'handled') return result
-        for (const listener of openListeners) listener()
-        return 'handled'
+    inject: (): PdfToggleInjected => ({
+      hooks: { mounted: ctx.sidebarRight.mounted },
+      openReader: () => {
+        // A page type opens for the Session the column shows; without one the
+        // dock has nowhere to put the page and would throw.
+        if (ctx.sidebarRight.mounted.getSnapshot() === undefined) return
+        ctx.sidebarRight.openTab(PDF_TAB_KIND)
+        requestOpen()
       },
-    })
+    }),
+  }, PdfToggleSeat)), 'dsh-pdf-reader.toggle')
+}
+
+/** One reader page: derives its hooks from the tab seat and renders the panel. */
+const PdfTabPage: SlotComponent<PropsRuntime<'sidebar.right.pane.tab'> & InjectFace<PdfTabInjected>> = (props) => {
+  const tabInfo = props.useTabInfo()
+  const imageLimits = props.useProjection('imageLimits')
+  return createElement(PdfPanel, {
+    sessionId: props.sessionId,
+    imageLimits,
+    attachSelectionFor: props.attachSelectionFor,
+    appendTextReferenceFor: props.appendTextReferenceFor,
+    sendDocumentsQuestionFor: props.sendDocumentsQuestionFor,
+    sendTextAiRequestFor: props.sendTextAiRequestFor,
+    sendAnnotationAiRequestFor: props.sendAnnotationAiRequestFor,
+    sendImageAiRequestFor: props.sendImageAiRequestFor,
+    sendMixedAiRequestFor: props.sendMixedAiRequestFor,
+    onClose: () => { tabInfo.tab.actions.close() },
+    onOpenRequest: props.onOpenRequest,
+    onCitationRequest: props.onCitationRequest,
+    onOutlineChange: props.onOutlineChange,
+    onSearchToggle: props.onSearchToggle,
+  })
+}
+
+/** The floating entry: Session gating plus the open verb. */
+const PdfToggleSeat: SlotComponent<
+  PropsRuntime<'shell.overlay'> & InjectFace<PdfToggleInjected>
+> = (props) => {
+  const onScreenSessionId = props.useMounted(state => state)
+  return createElement(PdfToggle, {
+    onToggle: () => {
+      const result = resolvePdfToggleResult(onScreenSessionId)
+      if (result !== 'handled') return result
+      props.openReader()
+      return 'handled'
+    },
   })
 }
