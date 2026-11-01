@@ -48,6 +48,7 @@ The textbook content shown in the screenshots comes from *Dive into Deep Learnin
 
 - **Reading and navigation:** multi-PDF tabs, outlines, bookmarks, thumbnails, full-text search, navigation history, zoom, fit modes, and non-destructive rotation
 - **Text and annotations:** native text selection, copy and AI actions, highlights, underlines, strikethroughs, comments, and an annotation center
+- **Word pick and quick translation:** double-click a word to select it and open the reading menu; the menu's translate button returns a dictionary line from the default model in place, without writing a conversation turn
 - **Multimodal AI:** image-region questions, a mixed evidence collection, evidence shared across PDFs, combined analysis, and clickable links back to sources
 - **Whole-document questions:** ask across one or more PDFs while fixing the document scope for the request and distinguishing sourced facts from inferences
 - **On-demand OCR:** disabled by default; after explicit user authorization, AI selects only the necessary pages within configurable budgets and never scans the whole document automatically
@@ -69,7 +70,7 @@ See [src/README.md](src/README.md) for the source layout.
 Download the prebuilt `.tgz` from GitHub Releases, then run the following commands from the root of a DeepSeek Harness checkout:
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.4.tgz
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.5.tgz
 pnpm dsh --profile web --dump-config | rg dsh-pdf-reader
 pnpm dsh web
 ```
@@ -131,6 +132,7 @@ The script fills in demo questions but does not send model requests.
 - The first OCR run must download PaddleOCR models; it fails when offline unless those models are already cached
 - The 300 MiB file-entry limit is a defensive ceiling, not a promised large-file performance target
 - A vision-capable model is required to analyze image regions
+- Quick translation uses the Harness default model; without one configured the popover explains why it cannot translate
 - The plugin neither modifies nor requires a customized DeepSeek Harness source tree
 
 ## License

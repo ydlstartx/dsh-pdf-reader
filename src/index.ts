@@ -4,7 +4,9 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { readFile } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-attachment'
@@ -41,6 +43,18 @@ import {
   PDF_OCR_ROUTE,
 } from './pdf-ocr.ts'
 import type { PdfOcrLine } from './pdf-ocr.ts'
+import {
+  buildPdfTranslatePrompt,
+  buildPdfTranslateSystemPrompt,
+  MAX_PDF_TRANSLATE_REQUEST_BYTES,
+  normalizedPdfTranslation,
+  parsePdfTranslateRequest,
+  PDF_TRANSLATE_MAX_OUTPUT_TOKENS,
+  PDF_TRANSLATE_ROUTE,
+  PDF_TRANSLATE_TIMEOUT_MS,
+  pdfTranslateTargetLanguage,
+} from './pdf-translate.ts'
+import type { PdfTranslateRequestPayload, PdfTranslateResponse } from './pdf-translate.ts'
 
 export const name = 'dsh-pdf-reader'
 export const inject = ['tools', 'webServer']
@@ -460,6 +474,66 @@ function releaseUndeliveredOcrBudget(document: MutablePdfDocumentIndex, request:
   }
 }
 
+/**
+ * Run one bounded dictionary lookup through the deployment's default model.
+ *
+ * The reader's quick-translate button wants one short answer, not a
+ * conversation turn: this builds a two-message request, caps its output, and
+ * never touches the Session log. Every failure is reported as data so the
+ * popover can show why nothing came back.
+ * @param ctx - host plugin context carrying `llm` and `agentDefaultModel`.
+ * @param text - validated, normalized selection.
+ * @returns the translation, or a failure carrying a displayable reason.
+ */
+async function translatePdfSelection(ctx: Context, text: string): Promise<PdfTranslateResponse> {
+  const llm = ctx.get('llm')
+  const defaults = ctx.get('agentDefaultModel')
+  if (llm === undefined || defaults === undefined) {
+    return { ok: false, error: '当前 Harness 没有可用的默认模型，无法快速翻译' }
+  }
+  const selection = defaults.currentSelection()
+  const signal = AbortSignal.timeout(PDF_TRANSLATE_TIMEOUT_MS)
+  try {
+    const info = await llm.resolveModelInfo(selection.provider, selection.model, signal)
+    // A dictionary line needs no deep reasoning; the route's lowest effort
+    // keeps latency low even when the default selection asks for more.
+    const effort = info.reasoning?.efforts[0]?.id
+    const assembler = new BlockAssembler()
+    for await (const chunk of llm.stream({
+      provider: selection.provider,
+      model: selection.model,
+      ...(effort === undefined ? {} : { reasoningEffort: effort }),
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: buildPdfTranslatePrompt(text, pdfTranslateTargetLanguage(text)) }],
+        source: { kind: 'user' },
+      })],
+      system: buildPdfTranslateSystemPrompt(),
+      maxTokens: PDF_TRANSLATE_MAX_OUTPUT_TOKENS,
+      signal,
+    })) {
+      assembler.push(chunk)
+    }
+    const finish = assembler.finish
+    if (finish.kind === 'error' || finish.kind === 'aborted') {
+      return { ok: false, error: `快速翻译失败：${finish.failure.message.slice(0, 300)}` }
+    }
+    const translation = normalizedPdfTranslation(assembler.blocks()
+      .flatMap(block => (block.type === 'text' ? [block.text] : []))
+      .join('\n'))
+    if (translation.length === 0) return { ok: false, error: '模型没有返回可用的译文' }
+    return {
+      ok: true,
+      text,
+      translation,
+      provider: selection.provider,
+      model: selection.model,
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { ok: false, error: `快速翻译失败：${message.slice(0, 300)}` }
+  }
+}
+
 export function apply(ctx: Context): void {
   const documents = new Map<string, MutablePdfDocumentIndex>()
   const ocrGrants = new Map<string, HostPdfOcrGrant>()
@@ -747,6 +821,37 @@ export function apply(ctx: Context): void {
       }
     },
   }), 'dsh-pdf-reader.ocr-assets')
+
+  // Quick translation for one selected word or phrase. Separate from the
+  // conversation on purpose: the reader shows the answer in its own popover and
+  // never writes an AI turn into the Session log.
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: PDF_TRANSLATE_ROUTE,
+    handler: async (req, res) => {
+      if (req.method !== 'POST') {
+        json(res, 405, { ok: false, error: 'method_not_allowed' })
+        return
+      }
+      if (!sameOrigin(req)) {
+        json(res, 403, { ok: false, error: 'origin_rejected' })
+        return
+      }
+      let payload: PdfTranslateRequestPayload | undefined
+      try {
+        payload = parsePdfTranslateRequest(await readJsonBody(req, MAX_PDF_TRANSLATE_REQUEST_BYTES))
+      } catch {
+        json(res, 400, { ok: false, error: 'invalid_request' })
+        return
+      }
+      if (payload === undefined) {
+        json(res, 400, { ok: false, error: 'invalid_request' })
+        return
+      }
+      const result = await translatePdfSelection(ctx, payload.text)
+      json(res, result.ok ? 200 : 502, result)
+    },
+  }), 'dsh-pdf-reader.translate-route')
 
   ctx.tools.register(defineTool({
     name: 'pdf_list_documents',

@@ -132,6 +132,7 @@ const HOST_EXTERNALS = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/dsh-attachment',
   '@deepseek-ai/dsh-host-webserver',
+  '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-tools',
 ]
 

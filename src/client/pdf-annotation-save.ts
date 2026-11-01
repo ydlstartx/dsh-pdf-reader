@@ -205,6 +205,8 @@ const MAX_EDITABLE_ANNOTATION_RECTS = 128
 const MAX_EDITABLE_ANNOTATION_TEXT = 20_000
 const MAX_EDITABLE_ANNOTATION_ID = 512
 const MAX_EDITABLE_PDF_BOOKMARK_DEPTH = 128
+/** Ceiling on name-tree pairs visited for one document's outline destinations. */
+const MAX_NAMED_DESTINATION_SCAN = 200_000
 
 function pdfText(dict: PDFDict, key: string): string | undefined {
   return dict.lookupMaybe(PDFName.of(key), PDFString, PDFHexString)?.decodeText()
@@ -244,7 +246,7 @@ function outlineDestinationPageNumber(
   pdf: PDFDocument,
   item: PDFDict,
   pageNumbersByRef: ReadonlyMap<string, number>,
-  namedDestinations: ReadonlyMap<string, PDFArray>,
+  lookupNamedDestination: (name: string) => PDFArray | undefined,
 ): number | undefined {
   let destination = pdf.context.lookup(item.get(PDFName.of('Dest')))
   if (!(destination instanceof PDFArray)) {
@@ -255,7 +257,7 @@ function outlineDestinationPageNumber(
   }
   if (destination instanceof PDFName || destination instanceof PDFString || destination instanceof PDFHexString) {
     try {
-      destination = namedDestinations.get(destination.decodeText())
+      destination = lookupNamedDestination(destination.decodeText())
     } catch {
       destination = undefined
     }
@@ -267,6 +269,12 @@ function outlineDestinationPageNumber(
     const ref = pdf.context.getObjectRef(target)
     return ref === undefined ? undefined : pageNumbersByRef.get(ref.tag)
   }
+  // Some producers write a zero-based page index where the spec asks for a
+  // page reference; accept it rather than dropping the bookmark.
+  if (target instanceof PDFNumber) {
+    const index = target.asNumber()
+    return Number.isInteger(index) && index >= 0 && index < pdf.getPageCount() ? index + 1 : undefined
+  }
   return undefined
 }
 
@@ -277,50 +285,91 @@ function destinationArray(pdf: PDFDocument, value: PDFObject | undefined): PDFAr
   return undefined
 }
 
-/** Resolve both the legacy Catalog/Dests dictionary and the standard name tree. */
-function loadNamedPdfDestinations(pdf: PDFDocument): ReadonlyMap<string, PDFArray> {
-  const destinations = new Map<string, PDFArray>()
+/**
+ * Keys are read lazily, only for the destinations the outline actually names.
+ *
+ * A name tree is not a dictionary: its keys live in `Names` arrays spread over
+ * `Kids`, so `/Dest (G2.9190)` can never be answered by a dict lookup. Producers
+ * such as hyperref, Word, and FrameMaker publish thousands of anchors per
+ * document, so a fixed scan cap silently loses the chapter destinations of
+ * long manuals; filtering by the wanted set instead keeps the work bounded by
+ * the outline while still reaching the last leaf.
+ */
+function createNamedDestinationLookup(
+  pdf: PDFDocument,
+  wantedNames: ReadonlySet<string>,
+): (name: string) => PDFArray | undefined {
+  const found = new Map<string, PDFArray>()
+  const pending = new Set(wantedNames)
+  const remember = (name: string, value: PDFObject | undefined): void => {
+    if (!pending.has(name)) return
+    const array = destinationArray(pdf, value)
+    if (array === undefined) return
+    found.set(name, array)
+    pending.delete(name)
+  }
+
+  // The legacy Catalog/Dests dictionary is a plain map: O(1) per name.
   const legacy = pdf.catalog.lookupMaybe(PDFName.of('Dests'), PDFDict)
   if (legacy !== undefined) {
-    for (const [name, value] of legacy.entries()) {
-      const array = destinationArray(pdf, value)
-      if (array !== undefined) destinations.set(name.decodeText(), array)
-    }
+    for (const name of [...pending]) remember(name, legacy.get(PDFName.of(name)))
   }
-  const names = pdf.catalog.lookupMaybe(PDFName.of('Names'), PDFDict)
-  const root = names?.lookupMaybe(PDFName.of('Dests'), PDFDict)
-  if (root === undefined) return destinations
-  const stack: PDFDict[] = [root]
-  const visited = new Set<PDFDict>()
-  let scanned = 0
-  while (stack.length > 0 && scanned < 4_000) {
-    const node = stack.pop()
-    if (node === undefined || visited.has(node)) continue
-    visited.add(node)
-    const entries = node.lookupMaybe(PDFName.of('Names'), PDFArray)
-    if (entries !== undefined) {
-      for (let index = 0; index + 1 < entries.size() && scanned < 4_000; index += 2) {
-        scanned += 1
-        const key = entries.lookupMaybe(index, PDFString, PDFHexString)
-        const array = destinationArray(pdf, entries.get(index + 1))
-        if (key !== undefined && array !== undefined) {
+
+  // The standard name tree is walked once, keeping only wanted names.
+  const tree = pdf.catalog.lookupMaybe(PDFName.of('Names'), PDFDict)?.lookupMaybe(PDFName.of('Dests'), PDFDict)
+  if (tree !== undefined && pending.size > 0) {
+    const visited = new Set<PDFDict>()
+    const stack: PDFDict[] = [tree]
+    let scanned = 0
+    while (stack.length > 0 && pending.size > 0 && scanned < MAX_NAMED_DESTINATION_SCAN) {
+      const node = stack.pop()
+      if (node === undefined || visited.has(node)) continue
+      visited.add(node)
+      const entries = node.lookupMaybe(PDFName.of('Names'), PDFArray)
+      if (entries !== undefined) {
+        for (let index = 0
+          ; index + 1 < entries.size() && pending.size > 0 && scanned < MAX_NAMED_DESTINATION_SCAN
+          ; index += 2) {
+          scanned += 1
+          const key = entries.lookupMaybe(index, PDFString, PDFHexString)
+          if (key === undefined) continue
+          let name: string
           try {
-            destinations.set(key.decodeText(), array)
+            name = key.decodeText()
           } catch {
-            // One malformed name must not hide the rest of the outline.
+            continue
           }
+          remember(name, entries.get(index + 1))
+        }
+      }
+      const kids = node.lookupMaybe(PDFName.of('Kids'), PDFArray)
+      if (kids !== undefined) {
+        for (let index = kids.size() - 1; index >= 0; index -= 1) {
+          const child = kids.lookupMaybe(index, PDFDict)
+          if (child !== undefined) stack.push(child)
         }
       }
     }
-    const kids = node.lookupMaybe(PDFName.of('Kids'), PDFArray)
-    if (kids !== undefined) {
-      for (let index = kids.size() - 1; index >= 0; index -= 1) {
-        const child = kids.lookupMaybe(index, PDFDict)
-        if (child !== undefined) stack.push(child)
-      }
+  }
+  return name => found.get(name)
+}
+
+/**
+ * The named destination one outline entry points at, when it uses the string
+ * form (`/Dest (anchor)` or `/A << /S /GoTo /D (anchor) >>`).
+ */
+function outlineDestinationName(pdf: PDFDocument, item: PDFDict): string | undefined {
+  const action = item.lookupMaybe(PDFName.of('A'), PDFDict)
+  const direct = pdf.context.lookup(item.get(PDFName.of('Dest')))
+  const candidate = direct ?? pdf.context.lookup(action?.get(PDFName.of('D')))
+  if (candidate instanceof PDFName || candidate instanceof PDFString || candidate instanceof PDFHexString) {
+    try {
+      return candidate.decodeText()
+    } catch {
+      return undefined
     }
   }
-  return destinations
+  return undefined
 }
 
 function outlineUri(item: PDFDict): string | undefined {
@@ -329,18 +378,32 @@ function outlineUri(item: PDFDict): string | undefined {
   return safelyDecodedPdfText(action, 'URI')
 }
 
-/** Read the common internal-page and URI forms of the standard PDF outline. */
+/** One outline entry collected before any destination is resolved. */
+interface PdfOutlineRecord {
+  readonly item: PDFDict
+  readonly id: string
+  readonly parentId: string | null
+  readonly depth: number
+  /** Named destination this entry points at, when it uses the string form. */
+  readonly destinationName: string | undefined
+}
+
+/**
+ * Read the common internal-page and URI forms of the standard PDF outline.
+ *
+ * Two passes: the first walks the tree and collects the named destinations the
+ * entries reference, the second resolves them (a name tree cannot be searched
+ * one key at a time cheaply) and builds the bookmark rows.
+ */
 function loadPdfBookmarks(
   pdf: PDFDocument,
   sourceDictionaries?: Map<string, PDFDict>,
 ): readonly PdfBookmark[] {
   const root = pdf.catalog.lookupMaybe(PDFName.of('Outlines'), PDFDict)
   if (root === undefined) return []
-  const pageNumbersByRef = new Map(pdf.getPages().map((page, index) => [page.ref.tag, index + 1]))
-  const namedDestinations = loadNamedPdfDestinations(pdf)
   const visited = new Set<PDFDict>()
   const usedIds = new Set<string>()
-  const bookmarks: PdfBookmark[] = []
+  const records: PdfOutlineRecord[] = []
   const roots = outlineLinkedChildren(pdf, root, visited)
   const stack = roots.map((item, index) => ({
     item,
@@ -349,7 +412,7 @@ function loadPdfBookmarks(
     depth: 0,
   })).reverse()
 
-  while (stack.length > 0 && bookmarks.length < 2_000) {
+  while (stack.length > 0 && records.length < 2_000) {
     const current = stack.pop()
     if (current === undefined) break
     const storedId = safelyDecodedPdfText(current.item, 'DSHId')?.slice(0, 512)
@@ -359,27 +422,13 @@ function loadPdfBookmarks(
     let suffix = 2
     while (usedIds.has(id)) id = `${baseId}-${String(suffix++)}`.slice(0, 512)
     usedIds.add(id)
-    const pageNumber = outlineDestinationPageNumber(pdf, current.item, pageNumbersByRef, namedDestinations)
-    const url = outlineUri(current.item)
-    const preserveSourceAction = pageNumber === undefined && url === undefined
-      && (current.item.has(PDFName.of('Dest')) || current.item.has(PDFName.of('A')))
-    const flags = current.item.lookupMaybe(PDFName.of('F'), PDFNumber)?.asNumber() ?? 0
-    const color = pdfNumbers(current.item, 'C', 3)
-    bookmarks.push({
+    records.push({
+      item: current.item,
       id,
       parentId: current.parentId,
-      title: (safelyDecodedPdfText(current.item, 'Title')?.trim() || '未命名书签').slice(0, 500),
-      ...(pageNumber === undefined ? {} : { pageNumber }),
-      ...(url === undefined ? {} : { url: url.slice(0, 8_192) }),
-      ...(Boolean(flags & 2) ? { bold: true } : {}),
-      ...(Boolean(flags & 1) ? { italic: true } : {}),
-      ...(color !== undefined && color.length === 3
-        && color.every(component => component >= 0 && component <= 1)
-        ? { color: [color[0]!, color[1]!, color[2]!] as const }
-        : {}),
-      ...(preserveSourceAction ? { preserveSourceAction: true } : {}),
+      depth: current.depth,
+      destinationName: outlineDestinationName(pdf, current.item),
     })
-    sourceDictionaries?.set(id, current.item)
     if (current.depth >= MAX_EDITABLE_PDF_BOOKMARK_DEPTH) continue
     const children = outlineLinkedChildren(pdf, current.item, visited)
     for (let index = children.length - 1; index >= 0; index -= 1) {
@@ -393,6 +442,37 @@ function loadPdfBookmarks(
         })
       }
     }
+  }
+
+  const wantedNames = new Set(records.flatMap(record => (
+    record.destinationName === undefined ? [] : [record.destinationName]
+  )))
+  const lookupNamedDestination = createNamedDestinationLookup(pdf, wantedNames)
+  const pageNumbersByRef = new Map(pdf.getPages().map((page, index) => [page.ref.tag, index + 1]))
+  const bookmarks: PdfBookmark[] = []
+  for (const record of records) {
+    const { item } = record
+    const pageNumber = outlineDestinationPageNumber(pdf, item, pageNumbersByRef, lookupNamedDestination)
+    const url = outlineUri(item)
+    const preserveSourceAction = pageNumber === undefined && url === undefined
+      && (item.has(PDFName.of('Dest')) || item.has(PDFName.of('A')))
+    const flags = item.lookupMaybe(PDFName.of('F'), PDFNumber)?.asNumber() ?? 0
+    const color = pdfNumbers(item, 'C', 3)
+    bookmarks.push({
+      id: record.id,
+      parentId: record.parentId,
+      title: (safelyDecodedPdfText(item, 'Title')?.trim() || '未命名书签').slice(0, 500),
+      ...(pageNumber === undefined ? {} : { pageNumber }),
+      ...(url === undefined ? {} : { url: url.slice(0, 8_192) }),
+      ...(Boolean(flags & 2) ? { bold: true } : {}),
+      ...(Boolean(flags & 1) ? { italic: true } : {}),
+      ...(color !== undefined && color.length === 3
+        && color.every(component => component >= 0 && component <= 1)
+        ? { color: [color[0]!, color[1]!, color[2]!] as const }
+        : {}),
+      ...(preserveSourceAction ? { preserveSourceAction: true } : {}),
+    })
+    sourceDictionaries?.set(record.id, item)
   }
   return bookmarks
 }

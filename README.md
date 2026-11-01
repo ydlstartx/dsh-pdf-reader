@@ -48,6 +48,7 @@ DeepSeek Harness 的外部（out-of-tree）PDF 阅读器插件，把阅读、批
 
 - **阅读与导航**：多 PDF 标签、目录、书签、缩略图、全文搜索、跳转历史、缩放、适配和无损旋转
 - **文字与批注**：原生文字选择、复制与 AI 操作，以及高亮、下划线、删除线、备注和批注中心
+- **取词与快译**：双击英文单词即可选中并弹出阅读菜单；菜单内的“译”按钮直接用默认模型给出单词/短语译文，结果显示在原地，不写入对话
 - **图文 AI**：图片区域提问、图文资料篮、多 PDF 共享资料、联合分析和可点击来源回链
 - **整份文档问答**：单份或多份 PDF 联合提问，固定本次文档范围，并按来源区分事实与推断
 - **按需 OCR**：默认关闭；用户明确授权后由 AI 选择必要页面，预算可配置且不会自动扫描整本
@@ -69,7 +70,7 @@ DeepSeek Harness 的外部（out-of-tree）PDF 阅读器插件，把阅读、批
 推荐从 GitHub Releases 下载构建好的 `.tgz`，然后在 DeepSeek Harness checkout 根目录执行：
 
 ```sh
-pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.4.tgz
+pnpm dsh plugin --profile web add /absolute/path/to/dsh-pdf-reader-0.1.0-beta.5.tgz
 pnpm dsh --profile web --dump-config | rg dsh-pdf-reader
 pnpm dsh web
 ```
@@ -131,6 +132,7 @@ D2L_PDF=/absolute/path/to/d2l-en.pdf node scripts/capture-readme.mjs
 - 首次 OCR 需要下载 PaddleOCR 模型；离线且无缓存时会失败
 - 300 MiB 是文件入口的防御上限，不代表已承诺的大文件性能指标
 - 需要视觉模型才能分析图片区域
+- 快速翻译使用 Harness 的默认模型；未配置默认模型时会提示无法翻译
 - 插件不修改或要求定制 DeepSeek Harness 源码
 
 ## 许可证

@@ -44,6 +44,11 @@ import {
 } from './pdf-outline.ts'
 import type { PdfOutlineController, ResolvedPdfOutlineItem } from './pdf-outline.ts'
 import {
+  requestPdfQuickTranslation,
+  quickTranslationErrorText,
+} from './pdf-quick-translate.ts'
+import { translatablePdfText } from '../pdf-translate.ts'
+import {
   isSafeExternalPdfBookmarkUrl,
   MAX_PDF_BOOKMARKS,
   pdfBookmarkDescendantIds,
@@ -290,6 +295,15 @@ type PdfAnnotationMenuState =
 interface PdfImageAiMenuState {
   selection: SelectionInfo
   anchor: ClientRectSnapshot
+}
+
+/** One inline dictionary lookup attached to the current text selection. */
+interface QuickTranslateState {
+  /** Normalized source the answer belongs to. */
+  readonly text: string
+  readonly phase: 'loading' | 'done' | 'error'
+  readonly translation?: string
+  readonly message?: string
 }
 
 type PdfInteractionMode = 'text' | 'crop'
@@ -618,6 +632,11 @@ function annotationMenuPosition(anchor: ClientRectSnapshot, width: number, heigh
     : Math.min(window.innerHeight - height - margin, anchor.bottom + gap)
   return { left, top }
 }
+
+/** Window in which a second press counts as a multi-click word/line selection. */
+const MULTI_CLICK_INTERVAL_MS = 500
+/** How far apart two presses may land and still count as one multi-click. */
+const MULTI_CLICK_DISTANCE_PX = 6
 
 const PDF_MARKUP_STROKE_WIDTHS: readonly { value: PdfMarkupStrokeWidth; label: string }[] = [
   { value: 1, label: '细线' },
@@ -1201,9 +1220,15 @@ const styles = {
     mixBlendMode: 'multiply',
     pointerEvents: 'none',
   } as const,
-  annotationMenu: {
+  annotationMenuShell: {
     position: 'fixed',
     zIndex: 380,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: '4px',
+  } as const,
+  annotationMenu: {
     display: 'flex',
     alignItems: 'center',
     gap: '2px',
@@ -1216,6 +1241,87 @@ const styles = {
     boxShadow: '0 4px 14px rgba(0,0,0,0.18), 0 1px 3px rgba(0,0,0,0.08)',
     backdropFilter: 'blur(10px)',
     boxSizing: 'border-box',
+  } as const,
+  quickTranslateButton: {
+    position: 'relative',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '2px',
+    height: '30px',
+    padding: '0 7px',
+    border: 'none',
+    borderRadius: '7px',
+    background: 'transparent',
+    color: '#71717a',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: 600,
+  } as const,
+  quickTranslatePanel: {
+    minWidth: '230px',
+    maxWidth: '320px',
+    padding: '8px 10px',
+    border: '1px solid rgba(0,0,0,0.12)',
+    borderRadius: '9px',
+    background: 'rgba(255,255,255,0.98)',
+    color: '#262626',
+    boxShadow: '0 4px 14px rgba(0,0,0,0.18), 0 1px 3px rgba(0,0,0,0.08)',
+    backdropFilter: 'blur(10px)',
+    boxSizing: 'border-box',
+    fontSize: '12px',
+    lineHeight: 1.5,
+  } as const,
+  quickTranslateHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '8px',
+    marginBottom: '4px',
+  } as const,
+  quickTranslateWord: {
+    flex: 1,
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontWeight: 600,
+    color: '#3154d8',
+  } as const,
+  quickTranslateClose: {
+    flex: '0 0 auto',
+    width: '20px',
+    height: '20px',
+    padding: 0,
+    border: 'none',
+    borderRadius: '5px',
+    background: 'transparent',
+    color: '#8c8c8c',
+    cursor: 'pointer',
+    fontSize: '13px',
+    lineHeight: '20px',
+  } as const,
+  quickTranslateBody: {
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+  } as const,
+  quickTranslateError: {
+    color: '#d4380d',
+  } as const,
+  quickTranslateFooter: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '6px',
+    marginTop: '6px',
+  } as const,
+  quickTranslateAction: {
+    padding: '2px 8px',
+    border: '1px solid rgba(0,0,0,0.12)',
+    borderRadius: '6px',
+    background: 'transparent',
+    color: '#3154d8',
+    cursor: 'pointer',
+    fontSize: '11px',
   } as const,
   annotationHighlightAction: {
     position: 'relative',
@@ -2947,6 +3053,8 @@ export function PdfViewer(props: PdfViewerProps) {
   const [interactionMode, setInteractionMode] = useState<PdfInteractionMode>('text')
   const textSelectionDraggingRef = useRef(false)
   const textSelectionAnchorRef = useRef<{ node: Node; offset: number } | undefined>(undefined)
+  /** Last primary press, used to recognize the second click of a multi-click. */
+  const lastPressRef = useRef<{ time: number; x: number; y: number } | undefined>(undefined)
   const textSelectionClampFrameRef = useRef<number | undefined>(undefined)
   const [annotationMenu, setAnnotationMenu] = useState<PdfAnnotationMenuState | undefined>(undefined)
   const [preferredHighlightColor, setPreferredHighlightColor] = useState<PdfMarkupColor>('yellow')
@@ -2956,6 +3064,9 @@ export function PdfViewer(props: PdfViewerProps) {
   const [annotationNoteGroupId, setAnnotationNoteGroupId] = useState<string | undefined>(undefined)
   const [annotationNoteDraft, setAnnotationNoteDraft] = useState('')
   const [annotationCopyStatus, setAnnotationCopyStatus] = useState<'copied' | 'failed' | undefined>(undefined)
+  /** Inline dictionary answer for the current selection, when the user asked for one. */
+  const [quickTranslate, setQuickTranslate] = useState<QuickTranslateState | undefined>(undefined)
+  const quickTranslateAbortRef = useRef<AbortController | undefined>(undefined)
   const [annotationAiMenuOpen, setAnnotationAiMenuOpen] = useState(false)
   const [annotationAiQuestionOpen, setAnnotationAiQuestionOpen] = useState(false)
   const [annotationAiQuestionDraft, setAnnotationAiQuestionDraft] = useState('')
@@ -3501,6 +3612,20 @@ export function PdfViewer(props: PdfViewerProps) {
       if (event.button !== 0 || interactionMode !== 'text' || !wide || !(event.target instanceof Element)) return
       const layer = eventLayer(event)
       if (layer === undefined) return
+      // A second press in the same place is a double/triple click: the browser
+      // selects a word or a line there, and this reader's caret clamp would
+      // erase it. Drop the queued collapse and let the native gesture stand.
+      const previous = lastPressRef.current
+      lastPressRef.current = { time: event.timeStamp, x: event.clientX, y: event.clientY }
+      if (previous !== undefined
+        && event.timeStamp - previous.time < MULTI_CLICK_INTERVAL_MS
+        && Math.abs(event.clientX - previous.x) <= MULTI_CLICK_DISTANCE_PX
+        && Math.abs(event.clientY - previous.y) <= MULTI_CLICK_DISTANCE_PX) {
+        cancelClamp()
+        textSelectionDraggingRef.current = false
+        textSelectionAnchorRef.current = undefined
+        return
+      }
       pdfTextCaretGeometryCache.delete(layer)
       textSelectionDraggingRef.current = true
       scheduleClamp(event, true)
@@ -3564,13 +3689,60 @@ export function PdfViewer(props: PdfViewerProps) {
     ? annotationMenu.pending.anchor
     : annotationMenu?.anchor
 
+  const cancelQuickTranslate = useCallback((): void => {
+    quickTranslateAbortRef.current?.abort()
+    quickTranslateAbortRef.current = undefined
+  }, [])
+
+  const closeQuickTranslate = useCallback((): void => {
+    cancelQuickTranslate()
+    setQuickTranslate(undefined)
+  }, [cancelQuickTranslate])
+
+  /**
+   * Ask the host for one dictionary line about the selected text. The answer
+   * stays inside the popover: no Session turn, no composer draft.
+   */
+  const translatePendingSelection = useCallback((selectionText: string): void => {
+    const text = translatablePdfText(selectionText)
+    if (text === undefined) {
+      setQuickTranslate({
+        text: selectionText.trim().slice(0, 40),
+        phase: 'error',
+        message: '请选择一个单词或较短的短语再翻译',
+      })
+      return
+    }
+    quickTranslateAbortRef.current?.abort()
+    const controller = new AbortController()
+    quickTranslateAbortRef.current = controller
+    setQuickTranslate({ text, phase: 'loading' })
+    void requestPdfQuickTranslation(text, controller.signal).then((result) => {
+      if (controller.signal.aborted) return
+      if (quickTranslateAbortRef.current === controller) quickTranslateAbortRef.current = undefined
+      setQuickTranslate({ text: result.text, phase: 'done', translation: result.translation })
+    }).catch((cause: unknown) => {
+      if (controller.signal.aborted) return
+      if (quickTranslateAbortRef.current === controller) quickTranslateAbortRef.current = undefined
+      setQuickTranslate({ text, phase: 'error', message: quickTranslationErrorText(cause) })
+    })
+  }, [])
+
+  // One popover serves one selection: a new selection (or a menu that closes)
+  // retires the previous answer.
+  useEffect(() => {
+    cancelQuickTranslate()
+    setQuickTranslate(undefined)
+  }, [annotationMenuIdentity, cancelQuickTranslate])
+  useEffect(() => () => { quickTranslateAbortRef.current?.abort() }, [])
+
   useLayoutEffect(() => {
     if (annotationMenuAnchor === undefined) return
     const menu = annotationMenuRef.current
     const width = menu?.offsetWidth ?? 210
     const height = menu?.offsetHeight ?? 40
     setAnnotationMenuPlacement(annotationMenuPosition(annotationMenuAnchor, width, height))
-  }, [annotationMenuAnchor])
+  }, [annotationMenuAnchor, quickTranslate])
 
   useEffect(() => {
     if (annotationMenu === undefined) return
@@ -5332,10 +5504,8 @@ export function PdfViewer(props: PdfViewerProps) {
         ref={annotationMenuRef}
         data-pdf-annotation-menu="true"
         data-pdf-annotation-menu-kind={annotationMenu.kind}
-        role="toolbar"
-        aria-label={annotationMenu.kind === 'selection' ? '创建文字标记' : '编辑文字标记'}
         style={{
-          ...styles.annotationMenu,
+          ...styles.annotationMenuShell,
           left: annotationMenuPlacement.left,
           top: annotationMenuPlacement.top,
         }}
@@ -5347,589 +5517,668 @@ export function PdfViewer(props: PdfViewerProps) {
           event.stopPropagation()
         }}
       >
-        <span data-pdf-highlight-action="true" style={styles.annotationHighlightAction}>
-          <button
-            type="button"
-            data-pdf-annotation-action="true"
-            data-pdf-highlight-apply={annotationMenu.kind === 'selection' ? 'true' : undefined}
-            aria-label={annotationMenu.kind === 'selection'
-              ? `使用${annotationMenuColorOption.label}高亮`
-              : '更改标记颜色'}
-            title={annotationMenu.kind === 'selection'
-              ? `使用${annotationMenuColorOption.label}高亮`
-              : '更改标记颜色'}
-            style={styles.annotationHighlightButton}
-            onClick={() => {
-              if (annotationMenu.kind === 'selection') {
-                props.onTextMarkupAdd(annotationMenu.pending.drafts, 'highlight', annotationMenuColor, preferredMarkupStrokeWidth)
-                window.getSelection()?.removeAllRanges()
-                setAnnotationMenu(undefined)
-              } else {
+        <div
+          role="toolbar"
+          aria-label={annotationMenu.kind === 'selection' ? '创建文字标记' : '编辑文字标记'}
+          style={styles.annotationMenu}
+        >
+          <span data-pdf-highlight-action="true" style={styles.annotationHighlightAction}>
+            <button
+              type="button"
+              data-pdf-annotation-action="true"
+              data-pdf-highlight-apply={annotationMenu.kind === 'selection' ? 'true' : undefined}
+              aria-label={annotationMenu.kind === 'selection'
+                ? `使用${annotationMenuColorOption.label}高亮`
+                : '更改标记颜色'}
+              title={annotationMenu.kind === 'selection'
+                ? `使用${annotationMenuColorOption.label}高亮`
+                : '更改标记颜色'}
+              style={styles.annotationHighlightButton}
+              onClick={() => {
+                if (annotationMenu.kind === 'selection') {
+                  props.onTextMarkupAdd(annotationMenu.pending.drafts, 'highlight', annotationMenuColor, preferredMarkupStrokeWidth)
+                  window.getSelection()?.removeAllRanges()
+                  setAnnotationMenu(undefined)
+                } else {
+                  setAnnotationStrokeMenuOpen(false)
+                  setAnnotationNoteGroupId(undefined)
+                  setAnnotationPaletteOpen(open => !open)
+                }
+              }}
+            >
+              <TextMarkupPdfIcon kind={activeAnnotation?.kind ?? 'highlight'} />
+              <span aria-hidden="true" style={{ ...styles.annotationHighlightIndicator, background: annotationMenuColorOption.hex }} />
+            </button>
+            <button
+              type="button"
+              data-pdf-annotation-action="true"
+              data-pdf-highlight-palette-toggle="true"
+              aria-label={annotationMenu.kind === 'selection' ? '选择高亮颜色' : '选择标记颜色'}
+              aria-expanded={annotationPaletteOpen}
+              title={annotationMenu.kind === 'selection' ? '选择高亮颜色' : '选择标记颜色'}
+              style={styles.annotationPaletteButton}
+              onClick={() => {
                 setAnnotationStrokeMenuOpen(false)
                 setAnnotationNoteGroupId(undefined)
                 setAnnotationPaletteOpen(open => !open)
-              }
-            }}
-          >
-            <TextMarkupPdfIcon kind={activeAnnotation?.kind ?? 'highlight'} />
-            <span aria-hidden="true" style={{ ...styles.annotationHighlightIndicator, background: annotationMenuColorOption.hex }} />
-          </button>
-          <button
-            type="button"
-            data-pdf-annotation-action="true"
-            data-pdf-highlight-palette-toggle="true"
-            aria-label={annotationMenu.kind === 'selection' ? '选择高亮颜色' : '选择标记颜色'}
-            aria-expanded={annotationPaletteOpen}
-            title={annotationMenu.kind === 'selection' ? '选择高亮颜色' : '选择标记颜色'}
-            style={styles.annotationPaletteButton}
-            onClick={() => {
-              setAnnotationStrokeMenuOpen(false)
-              setAnnotationNoteGroupId(undefined)
-              setAnnotationPaletteOpen(open => !open)
-            }}
-          >
-            <ChevronDownPdfIcon />
-          </button>
-          {annotationPaletteOpen && (
-            <span data-pdf-highlight-palette="true" role="group" aria-label="高亮颜色" style={styles.annotationPalette}>
-              {PDF_MARKUP_COLORS.map((option) => {
-                const selected = annotationMenuColor === option.id
-                const label = annotationMenu.kind === 'selection'
-                  ? `使用${option.label}高亮`
-                  : `将标记改为${option.label}`
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    data-pdf-annotation-action="true"
-                    data-pdf-highlight-color={option.id}
-                    aria-label={label}
-                    aria-pressed={selected}
-                    title={label}
-                    style={{
-                      ...styles.annotationColorButton,
-                      borderColor: selected ? '#4d6bfe' : 'transparent',
-                      background: selected ? 'rgba(77,107,254,0.08)' : 'transparent',
-                    }}
-                    onClick={() => {
-                      setPreferredHighlightColor(option.id)
-                      if (annotationMenu.kind === 'selection') {
-                        props.onTextMarkupAdd(annotationMenu.pending.drafts, 'highlight', option.id, preferredMarkupStrokeWidth)
-                        window.getSelection()?.removeAllRanges()
-                        setAnnotationMenu(undefined)
-                      } else {
-                        props.onTextMarkupColorChange(annotationMenu.groupId, option.id)
-                        setAnnotationPaletteOpen(false)
-                      }
-                    }}
-                  >
-                    <span aria-hidden="true" style={{ ...styles.annotationColorSwatch, background: option.hex }} />
-                  </button>
-                )
-              })}
-            </span>
-          )}
-        </span>
-        {annotationMenu.kind === 'selection' && (
-          <>
-            <button
-              type="button"
-              data-pdf-annotation-action="true"
-              data-pdf-markup-apply="underline"
-              aria-label={`使用${annotationMenuColorOption.label}下划线`}
-              title={`使用${annotationMenuColorOption.label}下划线`}
-              style={styles.annotationNoteButton}
-              onClick={() => {
-                props.onTextMarkupAdd(annotationMenu.pending.drafts, 'underline', annotationMenuColor, preferredMarkupStrokeWidth)
-                window.getSelection()?.removeAllRanges()
-                setAnnotationMenu(undefined)
               }}
             >
-              <UnderlinePdfIcon />
+              <ChevronDownPdfIcon />
             </button>
-            <button
-              type="button"
-              data-pdf-annotation-action="true"
-              data-pdf-markup-apply="strikeout"
-              aria-label={`使用${annotationMenuColorOption.label}删除线`}
-              title={`使用${annotationMenuColorOption.label}删除线`}
-              style={styles.annotationNoteButton}
-              onClick={() => {
-                props.onTextMarkupAdd(annotationMenu.pending.drafts, 'strikeout', annotationMenuColor, preferredMarkupStrokeWidth)
-                window.getSelection()?.removeAllRanges()
-                setAnnotationMenu(undefined)
-              }}
-            >
-              <StrikeoutPdfIcon />
-            </button>
-          </>
-        )}
-        {annotationMenu.kind === 'annotation' && activeAnnotation !== undefined && activeAnnotation.kind !== 'highlight' && (
-          <span style={styles.annotationStrokeAction}>
-            <button
-              type="button"
-              data-pdf-annotation-action="true"
-              data-pdf-markup-stroke-toggle="true"
-              aria-label="调整线宽"
-              aria-expanded={annotationStrokeMenuOpen}
-              title="调整线宽"
-              style={{
-                ...styles.annotationNoteButton,
-                background: annotationStrokeMenuOpen ? 'rgba(77,107,254,0.1)' : 'transparent',
-                color: annotationStrokeMenuOpen ? '#3154d8' : '#71717a',
-              }}
-              onClick={() => {
-                setAnnotationPaletteOpen(false)
-                setAnnotationNoteGroupId(undefined)
-                setAnnotationStrokeMenuOpen(open => !open)
-              }}
-            >
-              <LineWidthPdfIcon />
-            </button>
-            {annotationStrokeMenuOpen && (
-              <span role="group" aria-label="标记线宽" style={styles.annotationStrokePalette}>
-                {PDF_MARKUP_STROKE_WIDTHS.map(option => {
-                  const selected = annotationMenuStrokeWidth === option.value
+            {annotationPaletteOpen && (
+              <span data-pdf-highlight-palette="true" role="group" aria-label="高亮颜色" style={styles.annotationPalette}>
+                {PDF_MARKUP_COLORS.map((option) => {
+                  const selected = annotationMenuColor === option.id
+                  const label = annotationMenu.kind === 'selection'
+                    ? `使用${option.label}高亮`
+                    : `将标记改为${option.label}`
                   return (
                     <button
-                      key={option.value}
+                      key={option.id}
                       type="button"
                       data-pdf-annotation-action="true"
-                      data-pdf-markup-stroke-width={option.value}
-                      aria-label={option.label}
+                      data-pdf-highlight-color={option.id}
+                      aria-label={label}
                       aria-pressed={selected}
-                      title={option.label}
+                      title={label}
                       style={{
-                        ...styles.annotationStrokeOption,
+                        ...styles.annotationColorButton,
                         borderColor: selected ? '#4d6bfe' : 'transparent',
                         background: selected ? 'rgba(77,107,254,0.08)' : 'transparent',
                       }}
                       onClick={() => {
-                        setPreferredMarkupStrokeWidth(option.value)
-                        props.onTextMarkupStrokeWidthChange(annotationMenu.groupId, option.value)
-                        setAnnotationStrokeMenuOpen(false)
+                        setPreferredHighlightColor(option.id)
+                        if (annotationMenu.kind === 'selection') {
+                          props.onTextMarkupAdd(annotationMenu.pending.drafts, 'highlight', option.id, preferredMarkupStrokeWidth)
+                          window.getSelection()?.removeAllRanges()
+                          setAnnotationMenu(undefined)
+                        } else {
+                          props.onTextMarkupColorChange(annotationMenu.groupId, option.id)
+                          setAnnotationPaletteOpen(false)
+                        }
                       }}
                     >
-                      <span
-                        aria-hidden="true"
-                        style={{
-                          ...styles.annotationStrokeSample,
-                          borderTop: `${String(option.value)}px solid currentColor`,
-                        }}
-                      />
+                      <span aria-hidden="true" style={{ ...styles.annotationColorSwatch, background: option.hex }} />
                     </button>
                   )
                 })}
               </span>
             )}
           </span>
-        )}
-        <button
-          type="button"
-          data-pdf-annotation-action="true"
-          data-pdf-highlight-note="true"
-          aria-label={activeAnnotation?.note.length ? '编辑批注' : '添加批注'}
-          aria-pressed={annotationNoteGroupId !== undefined}
-          title={activeAnnotation?.note.length ? '编辑批注' : '添加批注'}
-          style={{
-            ...styles.annotationNoteButton,
-            background: annotationNoteGroupId !== undefined ? 'rgba(77,107,254,0.1)' : 'transparent',
-            color: annotationNoteGroupId !== undefined ? '#3154d8' : '#71717a',
-          }}
-          onClick={() => {
-            setAnnotationPaletteOpen(false)
-            setAnnotationStrokeMenuOpen(false)
-            if (annotationMenu.kind === 'selection') {
-              const groupId = props.onTextMarkupAdd(annotationMenu.pending.drafts, 'highlight', annotationMenuColor, preferredMarkupStrokeWidth)
-              if (groupId === undefined) return
-              const anchor = annotationMenu.pending.anchor
-              window.getSelection()?.removeAllRanges()
-              setAnnotationMenu({ kind: 'annotation', groupId, anchor })
-              setAnnotationNoteDraft('')
-              setAnnotationNoteGroupId(groupId)
-            } else {
-              setAnnotationNoteDraft(activeAnnotation?.note ?? '')
-              setAnnotationNoteGroupId(current => current === annotationMenu.groupId ? undefined : annotationMenu.groupId)
-            }
-          }}
-        >
-          <CommentPdfIcon />
-          {activeAnnotation?.note.length ? <span aria-hidden="true" style={styles.annotationNoteIndicator} /> : null}
-        </button>
-        {annotationMenu.kind === 'selection' && (
-          <>
-            <span aria-hidden="true" style={styles.annotationMenuDivider} />
-            <button
-              type="button"
-              data-pdf-annotation-action="true"
-              data-pdf-copy-selection="true"
-              aria-label={annotationCopyStatus === 'copied' ? '已复制' : annotationCopyStatus === 'failed' ? '复制失败' : '复制文字'}
-              title={annotationCopyStatus === 'copied' ? '已复制' : annotationCopyStatus === 'failed' ? '复制失败' : '复制文字'}
-              style={{
-                ...styles.annotationNoteButton,
-                color: annotationCopyStatus === 'copied'
-                  ? '#16803a'
-                  : annotationCopyStatus === 'failed' ? '#d4380d' : '#71717a',
-              }}
-              onClick={() => {
-                setAnnotationPaletteOpen(false)
-                const text = annotationMenu.pending.text
-                void copyPdfTextSelection(text).then((copied) => {
-                  if (annotationCopyTimerRef.current !== undefined) {
-                    window.clearTimeout(annotationCopyTimerRef.current)
-                  }
-                  setAnnotationCopyStatus(copied ? 'copied' : 'failed')
-                  annotationCopyTimerRef.current = window.setTimeout(() => {
-                    annotationCopyTimerRef.current = undefined
-                    setAnnotationCopyStatus(undefined)
-                  }, 1600)
-                })
-              }}
-            >
-              {annotationCopyStatus === 'copied' ? <CheckPdfIcon /> : <CopyPdfIcon />}
-            </button>
-            <span style={styles.annotationAiAction}>
+          {annotationMenu.kind === 'selection' && (
+            <>
               <button
                 type="button"
                 data-pdf-annotation-action="true"
-                data-pdf-ai-menu-toggle="true"
-                aria-label="AI 阅读工具"
-                aria-expanded={annotationAiMenuOpen || annotationAiQuestionOpen}
-                title="解释、翻译或深入提问"
+                data-pdf-markup-apply="underline"
+                aria-label={`使用${annotationMenuColorOption.label}下划线`}
+                title={`使用${annotationMenuColorOption.label}下划线`}
+                style={styles.annotationNoteButton}
+                onClick={() => {
+                  props.onTextMarkupAdd(annotationMenu.pending.drafts, 'underline', annotationMenuColor, preferredMarkupStrokeWidth)
+                  window.getSelection()?.removeAllRanges()
+                  setAnnotationMenu(undefined)
+                }}
+              >
+                <UnderlinePdfIcon />
+              </button>
+              <button
+                type="button"
+                data-pdf-annotation-action="true"
+                data-pdf-markup-apply="strikeout"
+                aria-label={`使用${annotationMenuColorOption.label}删除线`}
+                title={`使用${annotationMenuColorOption.label}删除线`}
+                style={styles.annotationNoteButton}
+                onClick={() => {
+                  props.onTextMarkupAdd(annotationMenu.pending.drafts, 'strikeout', annotationMenuColor, preferredMarkupStrokeWidth)
+                  window.getSelection()?.removeAllRanges()
+                  setAnnotationMenu(undefined)
+                }}
+              >
+                <StrikeoutPdfIcon />
+              </button>
+            </>
+          )}
+          {annotationMenu.kind === 'annotation' && activeAnnotation !== undefined && activeAnnotation.kind !== 'highlight' && (
+            <span style={styles.annotationStrokeAction}>
+              <button
+                type="button"
+                data-pdf-annotation-action="true"
+                data-pdf-markup-stroke-toggle="true"
+                aria-label="调整线宽"
+                aria-expanded={annotationStrokeMenuOpen}
+                title="调整线宽"
                 style={{
-                  ...styles.annotationAiButton,
-                  background: annotationAiMenuOpen || annotationAiQuestionOpen
-                    ? 'rgba(77,107,254,0.18)'
-                    : styles.annotationAiButton.background,
+                  ...styles.annotationNoteButton,
+                  background: annotationStrokeMenuOpen ? 'rgba(77,107,254,0.1)' : 'transparent',
+                  color: annotationStrokeMenuOpen ? '#3154d8' : '#71717a',
                 }}
                 onClick={() => {
                   setAnnotationPaletteOpen(false)
-                  setAnnotationStrokeMenuOpen(false)
                   setAnnotationNoteGroupId(undefined)
-                  setSelectionError(undefined)
-                  if (annotationAiQuestionOpen) {
-                    setAnnotationAiQuestionOpen(false)
-                    setAnnotationAiMenuOpen(false)
-                  } else {
-                    setAnnotationAiMenuOpen(open => !open)
-                  }
+                  setAnnotationStrokeMenuOpen(open => !open)
                 }}
               >
-                <PdfAiSparkleIcon />
-                <span>{mixedAiActive ? 'AI · 图文' : 'AI'}</span>
-                <ChevronDownPdfIcon />
+                <LineWidthPdfIcon />
               </button>
-              {annotationAiMenuOpen && (
-                <div
-                  data-pdf-ai-menu="true"
-                  role="menu"
-                  aria-label="AI 阅读操作"
-                  style={{ ...styles.annotationAiMenu, ...annotationAiPopoverPlacement }}
-                >
-                  {mixedAiActive ? (
-                    <>
-                      <div data-pdf-mixed-ai-summary="true" style={styles.imageAiHeader}>
-                        图文组合 · {String(selectedEvidenceImages.length)} 张图片 + {String(mixedTextCount)} 段文字
-                      </div>
+              {annotationStrokeMenuOpen && (
+                <span role="group" aria-label="标记线宽" style={styles.annotationStrokePalette}>
+                  {PDF_MARKUP_STROKE_WIDTHS.map(option => {
+                    const selected = annotationMenuStrokeWidth === option.value
+                    return (
                       <button
+                        key={option.value}
                         type="button"
-                        role="menuitem"
-                        data-pdf-mixed-ai-action="explain"
-                        disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => { submitMixedAiRequest('explain', annotationMenu.pending) }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>综合解释</span>
-                        <span style={styles.annotationAiMenuHint}>结合图中结构和文字论述说明概念</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-mixed-ai-action="relate"
-                        disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => { submitMixedAiRequest('relate', annotationMenu.pending) }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>分析对应关系</span>
-                        <span style={styles.annotationAiMenuHint}>逐项对应文字陈述与图片中的部分</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-mixed-ai-action="verify"
-                        disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => { submitMixedAiRequest('verify', annotationMenu.pending) }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>核对一致性</span>
-                        <span style={styles.annotationAiMenuHint}>检查支持、矛盾、遗漏和易误解之处</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-mixed-ai-action="question"
-                        disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
+                        data-pdf-annotation-action="true"
+                        data-pdf-markup-stroke-width={option.value}
+                        aria-label={option.label}
+                        aria-pressed={selected}
+                        title={option.label}
+                        style={{
+                          ...styles.annotationStrokeOption,
+                          borderColor: selected ? '#4d6bfe' : 'transparent',
+                          background: selected ? 'rgba(77,107,254,0.08)' : 'transparent',
+                        }}
                         onClick={() => {
-                          setAnnotationAiMenuOpen(false)
-                          setAnnotationAiQuestionOpen(true)
+                          setPreferredMarkupStrokeWidth(option.value)
+                          props.onTextMarkupStrokeWidthChange(annotationMenu.groupId, option.value)
+                          setAnnotationStrokeMenuOpen(false)
                         }}
                       >
-                        <span style={styles.annotationAiMenuLabel}>深入提问…</span>
-                        <span style={styles.annotationAiMenuHint}>围绕当前已选资料图片和这段文字提问</span>
+                        <span
+                          aria-hidden="true"
+                          style={{
+                            ...styles.annotationStrokeSample,
+                            borderTop: `${String(option.value)}px solid currentColor`,
+                          }}
+                        />
                       </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-mixed-ai-add-evidence="true"
-                        disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
-                        style={{ ...styles.annotationAiMenuItem, borderTop: '1px solid rgba(0,0,0,0.08)', marginTop: '3px' }}
-                        onClick={() => { addPendingTextEvidence(annotationMenu.pending) }}
-                      >
-                        <span style={{ ...styles.annotationAiMenuLabel, color: '#3154d8' }}>加入资料，继续选择</span>
-                        <span style={styles.annotationAiMenuHint}>暂存这段原文，稍后与更多图文一起分析</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-mixed-ai-text-only="true"
-                        style={{ ...styles.annotationAiMenuItem, borderTop: '1px solid rgba(0,0,0,0.08)', marginTop: '3px' }}
-                        onClick={() => { setMixedTextIntent(false) }}
-                      >
-                        <span style={styles.annotationAiMenuHint}>仅使用当前文字</span>
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      {selectedEvidenceImages.length > 0 && (
+                    )
+                  })}
+                </span>
+              )}
+            </span>
+          )}
+          <button
+            type="button"
+            data-pdf-annotation-action="true"
+            data-pdf-highlight-note="true"
+            aria-label={activeAnnotation?.note.length ? '编辑批注' : '添加批注'}
+            aria-pressed={annotationNoteGroupId !== undefined}
+            title={activeAnnotation?.note.length ? '编辑批注' : '添加批注'}
+            style={{
+              ...styles.annotationNoteButton,
+              background: annotationNoteGroupId !== undefined ? 'rgba(77,107,254,0.1)' : 'transparent',
+              color: annotationNoteGroupId !== undefined ? '#3154d8' : '#71717a',
+            }}
+            onClick={() => {
+              setAnnotationPaletteOpen(false)
+              setAnnotationStrokeMenuOpen(false)
+              if (annotationMenu.kind === 'selection') {
+                const groupId = props.onTextMarkupAdd(annotationMenu.pending.drafts, 'highlight', annotationMenuColor, preferredMarkupStrokeWidth)
+                if (groupId === undefined) return
+                const anchor = annotationMenu.pending.anchor
+                window.getSelection()?.removeAllRanges()
+                setAnnotationMenu({ kind: 'annotation', groupId, anchor })
+                setAnnotationNoteDraft('')
+                setAnnotationNoteGroupId(groupId)
+              } else {
+                setAnnotationNoteDraft(activeAnnotation?.note ?? '')
+                setAnnotationNoteGroupId(current => current === annotationMenu.groupId ? undefined : annotationMenu.groupId)
+              }
+            }}
+          >
+            <CommentPdfIcon />
+            {activeAnnotation?.note.length ? <span aria-hidden="true" style={styles.annotationNoteIndicator} /> : null}
+          </button>
+          {annotationMenu.kind === 'selection' && (
+            <>
+              <span aria-hidden="true" style={styles.annotationMenuDivider} />
+              <button
+                type="button"
+                data-pdf-annotation-action="true"
+                data-pdf-copy-selection="true"
+                aria-label={annotationCopyStatus === 'copied' ? '已复制' : annotationCopyStatus === 'failed' ? '复制失败' : '复制文字'}
+                title={annotationCopyStatus === 'copied' ? '已复制' : annotationCopyStatus === 'failed' ? '复制失败' : '复制文字'}
+                style={{
+                  ...styles.annotationNoteButton,
+                  color: annotationCopyStatus === 'copied'
+                    ? '#16803a'
+                    : annotationCopyStatus === 'failed' ? '#d4380d' : '#71717a',
+                }}
+                onClick={() => {
+                  setAnnotationPaletteOpen(false)
+                  const text = annotationMenu.pending.text
+                  void copyPdfTextSelection(text).then((copied) => {
+                    if (annotationCopyTimerRef.current !== undefined) {
+                      window.clearTimeout(annotationCopyTimerRef.current)
+                    }
+                    setAnnotationCopyStatus(copied ? 'copied' : 'failed')
+                    annotationCopyTimerRef.current = window.setTimeout(() => {
+                      annotationCopyTimerRef.current = undefined
+                      setAnnotationCopyStatus(undefined)
+                    }, 1600)
+                  })
+                }}
+              >
+                {annotationCopyStatus === 'copied' ? <CheckPdfIcon /> : <CopyPdfIcon />}
+              </button>
+              <button
+                type="button"
+                data-pdf-annotation-action="true"
+                data-pdf-quick-translate="true"
+                aria-label="快速翻译选中文字"
+                aria-pressed={quickTranslate !== undefined}
+                title="快速翻译（英文 ↔ 中文）"
+                style={{
+                  ...styles.quickTranslateButton,
+                  background: quickTranslate !== undefined ? 'rgba(77,107,254,0.12)' : 'transparent',
+                  color: quickTranslate !== undefined ? '#3154d8' : '#71717a',
+                }}
+                onClick={() => {
+                  setAnnotationPaletteOpen(false)
+                  setAnnotationAiMenuOpen(false)
+                  setAnnotationAiQuestionOpen(false)
+                  if (quickTranslate !== undefined) {
+                    closeQuickTranslate()
+                    return
+                  }
+                  translatePendingSelection(annotationMenu.pending.text)
+                }}
+              >
+                译
+              </button>
+              <span style={styles.annotationAiAction}>
+                <button
+                  type="button"
+                  data-pdf-annotation-action="true"
+                  data-pdf-ai-menu-toggle="true"
+                  aria-label="AI 阅读工具"
+                  aria-expanded={annotationAiMenuOpen || annotationAiQuestionOpen}
+                  title="解释、翻译或深入提问"
+                  style={{
+                    ...styles.annotationAiButton,
+                    background: annotationAiMenuOpen || annotationAiQuestionOpen
+                      ? 'rgba(77,107,254,0.18)'
+                      : styles.annotationAiButton.background,
+                  }}
+                  onClick={() => {
+                    setAnnotationPaletteOpen(false)
+                    setAnnotationStrokeMenuOpen(false)
+                    setAnnotationNoteGroupId(undefined)
+                    setSelectionError(undefined)
+                    if (annotationAiQuestionOpen) {
+                      setAnnotationAiQuestionOpen(false)
+                      setAnnotationAiMenuOpen(false)
+                    } else {
+                      setAnnotationAiMenuOpen(open => !open)
+                    }
+                  }}
+                >
+                  <PdfAiSparkleIcon />
+                  <span>{mixedAiActive ? 'AI · 图文' : 'AI'}</span>
+                  <ChevronDownPdfIcon />
+                </button>
+                {annotationAiMenuOpen && (
+                  <div
+                    data-pdf-ai-menu="true"
+                    role="menu"
+                    aria-label="AI 阅读操作"
+                    style={{ ...styles.annotationAiMenu, ...annotationAiPopoverPlacement }}
+                  >
+                    {mixedAiActive ? (
+                      <>
+                        <div data-pdf-mixed-ai-summary="true" style={styles.imageAiHeader}>
+                          图文组合 · {String(selectedEvidenceImages.length)} 张图片 + {String(mixedTextCount)} 段文字
+                        </div>
                         <button
                           type="button"
                           role="menuitem"
-                          data-pdf-ai-action="mixed"
+                          data-pdf-mixed-ai-action="explain"
                           disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
-                          style={{ ...styles.annotationAiMenuItem, background: 'rgba(77,107,254,0.08)' }}
-                          onClick={() => { setMixedTextIntent(true) }}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => { submitMixedAiRequest('explain', annotationMenu.pending) }}
                         >
-                          <span style={{ ...styles.annotationAiMenuLabel, color: '#3154d8' }}>
-                            与 {String(selectedEvidenceImages.length)} 张已选资料图片一起分析
-                          </span>
-                          <span style={styles.annotationAiMenuHint}>将图片和当前选段作为同一次 AI 请求</span>
+                          <span style={styles.annotationAiMenuLabel}>综合解释</span>
+                          <span style={styles.annotationAiMenuHint}>结合图中结构和文字论述说明概念</span>
                         </button>
-                      )}
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-ai-action="evidence"
-                        disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => { addPendingTextEvidence(annotationMenu.pending) }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>加入图文资料</span>
-                        <span style={styles.annotationAiMenuHint}>收集多段原文，之后统一定位和分析</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-ai-action="explain"
-                        disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => { submitTextAiRequest('explain', annotationMenu.pending) }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>解释选段</span>
-                        <span style={styles.annotationAiMenuHint}>结合当前对话与工作区说明概念</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-ai-action="translate"
-                        disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => { submitTextAiRequest('translate', annotationMenu.pending) }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>翻译选段</span>
-                        <span style={styles.annotationAiMenuHint}>保留术语、公式和代码格式</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-ai-action="question"
-                        disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => {
-                          setAnnotationAiMenuOpen(false)
-                          setAnnotationAiQuestionOpen(true)
-                        }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>深入提问…</span>
-                        <span style={styles.annotationAiMenuHint}>围绕原文提出自己的问题</span>
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-pdf-ai-action="context"
-                        disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
-                        style={styles.annotationAiMenuItem}
-                        onClick={() => {
-                          setSelectionError(undefined)
-                          const pending = annotationMenu.pending
-                          try {
-                            props.onTextReferenceAdd(
-                              pending.text,
-                              pending.drafts.map(draft => draft.pageNumber),
-                            )
-                            window.getSelection()?.removeAllRanges()
-                            setAnnotationMenu(undefined)
-                          } catch (cause) {
-                            setSelectionError(cause instanceof Error ? cause.message : String(cause))
-                          }
-                        }}
-                      >
-                        <span style={styles.annotationAiMenuLabel}>加入上下文</span>
-                        <span style={styles.annotationAiMenuHint}>暂存到主输入框，与其他片段组合</span>
-                      </button>
-                    </>
-                  )}
-                </div>
-              )}
-              {annotationAiQuestionOpen && (
-                <form
-                  data-pdf-ai-question-editor="true"
-                  aria-label={mixedAiActive ? '围绕 PDF 图文资料深入提问' : '围绕 PDF 选段深入提问'}
-                  style={{ ...styles.annotationAiQuestionEditor, ...annotationAiPopoverPlacement }}
-                  onSubmit={(event) => {
-                    event.preventDefault()
-                    if (mixedAiActive) submitMixedAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
-                    else submitTextAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
-                  }}
-                >
-                  <div style={styles.annotationAiQuestionTitle}>
-                    {mixedAiActive
-                      ? `${String(selectedEvidenceImages.length)} 张图片 + ${String(mixedTextCount)} 段文字`
-                      : '围绕这段原文提问'}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-mixed-ai-action="relate"
+                          disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => { submitMixedAiRequest('relate', annotationMenu.pending) }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>分析对应关系</span>
+                          <span style={styles.annotationAiMenuHint}>逐项对应文字陈述与图片中的部分</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-mixed-ai-action="verify"
+                          disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => { submitMixedAiRequest('verify', annotationMenu.pending) }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>核对一致性</span>
+                          <span style={styles.annotationAiMenuHint}>检查支持、矛盾、遗漏和易误解之处</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-mixed-ai-action="question"
+                          disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => {
+                            setAnnotationAiMenuOpen(false)
+                            setAnnotationAiQuestionOpen(true)
+                          }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>深入提问…</span>
+                          <span style={styles.annotationAiMenuHint}>围绕当前已选资料图片和这段文字提问</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-mixed-ai-add-evidence="true"
+                          disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
+                          style={{ ...styles.annotationAiMenuItem, borderTop: '1px solid rgba(0,0,0,0.08)', marginTop: '3px' }}
+                          onClick={() => { addPendingTextEvidence(annotationMenu.pending) }}
+                        >
+                          <span style={{ ...styles.annotationAiMenuLabel, color: '#3154d8' }}>加入资料，继续选择</span>
+                          <span style={styles.annotationAiMenuHint}>暂存这段原文，稍后与更多图文一起分析</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-mixed-ai-text-only="true"
+                          style={{ ...styles.annotationAiMenuItem, borderTop: '1px solid rgba(0,0,0,0.08)', marginTop: '3px' }}
+                          onClick={() => { setMixedTextIntent(false) }}
+                        >
+                          <span style={styles.annotationAiMenuHint}>仅使用当前文字</span>
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        {selectedEvidenceImages.length > 0 && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            data-pdf-ai-action="mixed"
+                            disabled={mixedAiBusy !== undefined || annotationAiBusy !== undefined}
+                            style={{ ...styles.annotationAiMenuItem, background: 'rgba(77,107,254,0.08)' }}
+                            onClick={() => { setMixedTextIntent(true) }}
+                          >
+                            <span style={{ ...styles.annotationAiMenuLabel, color: '#3154d8' }}>
+                              与 {String(selectedEvidenceImages.length)} 张已选资料图片一起分析
+                            </span>
+                            <span style={styles.annotationAiMenuHint}>将图片和当前选段作为同一次 AI 请求</span>
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-ai-action="evidence"
+                          disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => { addPendingTextEvidence(annotationMenu.pending) }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>加入图文资料</span>
+                          <span style={styles.annotationAiMenuHint}>收集多段原文，之后统一定位和分析</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-ai-action="explain"
+                          disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => { submitTextAiRequest('explain', annotationMenu.pending) }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>解释选段</span>
+                          <span style={styles.annotationAiMenuHint}>结合当前对话与工作区说明概念</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-ai-action="translate"
+                          disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => { submitTextAiRequest('translate', annotationMenu.pending) }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>翻译选段</span>
+                          <span style={styles.annotationAiMenuHint}>保留术语、公式和代码格式</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-ai-action="question"
+                          disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => {
+                            setAnnotationAiMenuOpen(false)
+                            setAnnotationAiQuestionOpen(true)
+                          }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>深入提问…</span>
+                          <span style={styles.annotationAiMenuHint}>围绕原文提出自己的问题</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          data-pdf-ai-action="context"
+                          disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined}
+                          style={styles.annotationAiMenuItem}
+                          onClick={() => {
+                            setSelectionError(undefined)
+                            const pending = annotationMenu.pending
+                            try {
+                              props.onTextReferenceAdd(
+                                pending.text,
+                                pending.drafts.map(draft => draft.pageNumber),
+                              )
+                              window.getSelection()?.removeAllRanges()
+                              setAnnotationMenu(undefined)
+                            } catch (cause) {
+                              setSelectionError(cause instanceof Error ? cause.message : String(cause))
+                            }
+                          }}
+                        >
+                          <span style={styles.annotationAiMenuLabel}>加入上下文</span>
+                          <span style={styles.annotationAiMenuHint}>暂存到主输入框，与其他片段组合</span>
+                        </button>
+                      </>
+                    )}
                   </div>
-                  <textarea
-                    ref={annotationAiQuestionInputRef}
-                    aria-label={mixedAiActive ? '图文提问内容' : '深入提问内容'}
-                    placeholder={mixedAiActive ? '例如：正文中的描述分别对应图中哪些部分？' : '例如：这段结论如何对应当前项目？'}
-                    maxLength={MAX_PDF_AI_QUESTION_CODE_UNITS}
-                    value={annotationAiQuestionDraft}
-                    style={styles.annotationNoteTextarea}
-                    onChange={(event) => { setAnnotationAiQuestionDraft(event.target.value) }}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Escape') {
-                        event.preventDefault()
-                        event.stopPropagation()
-                        setAnnotationAiQuestionOpen(false)
-                        setAnnotationAiMenuOpen(true)
-                      } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                        event.preventDefault()
-                        if (mixedAiActive) submitMixedAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
-                        else submitTextAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
-                      }
+                )}
+                {annotationAiQuestionOpen && (
+                  <form
+                    data-pdf-ai-question-editor="true"
+                    aria-label={mixedAiActive ? '围绕 PDF 图文资料深入提问' : '围绕 PDF 选段深入提问'}
+                    style={{ ...styles.annotationAiQuestionEditor, ...annotationAiPopoverPlacement }}
+                    onSubmit={(event) => {
+                      event.preventDefault()
+                      if (mixedAiActive) submitMixedAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
+                      else submitTextAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
                     }}
-                  />
-                  <div style={styles.annotationNoteFooter}>
-                    <span style={styles.annotationNoteCount}>
-                      {String(annotationAiQuestionDraft.length)} / {String(MAX_PDF_AI_QUESTION_CODE_UNITS)}
-                    </span>
-                    <span style={styles.annotationNoteActions}>
-                      <button
-                        type="button"
-                        style={styles.annotationNoteAction}
-                        onClick={() => {
+                  >
+                    <div style={styles.annotationAiQuestionTitle}>
+                      {mixedAiActive
+                        ? `${String(selectedEvidenceImages.length)} 张图片 + ${String(mixedTextCount)} 段文字`
+                        : '围绕这段原文提问'}
+                    </div>
+                    <textarea
+                      ref={annotationAiQuestionInputRef}
+                      aria-label={mixedAiActive ? '图文提问内容' : '深入提问内容'}
+                      placeholder={mixedAiActive ? '例如：正文中的描述分别对应图中哪些部分？' : '例如：这段结论如何对应当前项目？'}
+                      maxLength={MAX_PDF_AI_QUESTION_CODE_UNITS}
+                      value={annotationAiQuestionDraft}
+                      style={styles.annotationNoteTextarea}
+                      onChange={(event) => { setAnnotationAiQuestionDraft(event.target.value) }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Escape') {
+                          event.preventDefault()
+                          event.stopPropagation()
                           setAnnotationAiQuestionOpen(false)
                           setAnnotationAiMenuOpen(true)
-                        }}
-                      >
-                        返回
-                      </button>
-                      <button
-                        type="submit"
-                        data-pdf-ai-question-send="true"
-                        disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined || annotationAiQuestionDraft.trim().length === 0}
-                        style={{ ...styles.annotationNoteAction, ...styles.annotationNoteSave }}
-                      >
-                        {annotationAiBusy === 'question' || mixedAiBusy === 'question' ? '发送中…' : '发送'}
-                      </button>
-                    </span>
-                  </div>
-                </form>
-              )}
-            </span>
-          </>
-        )}
-        {annotationMenu.kind === 'annotation' && (
-          <>
-            <span aria-hidden="true" style={styles.annotationMenuDivider} />
-            <button
-              type="button"
-              data-pdf-highlight-delete="true"
-              data-pdf-annotation-action="true"
-              aria-label="删除标记"
-              title="删除标记"
-              style={styles.annotationDeleteButton}
-              onClick={() => {
-                props.onTextMarkupRemove(annotationMenu.groupId)
-                setAnnotationMenu(undefined)
-              }}
-            >
-              <DeletePdfIcon />
-            </button>
-          </>
-        )}
-        {annotationMenu.kind === 'annotation' && annotationNoteGroupId === annotationMenu.groupId && (
-          <div
-            data-pdf-annotation-note-editor="true"
-            role="dialog"
-            aria-label="文字标记批注"
-            style={styles.annotationNoteEditor}
-          >
-            <textarea
-              ref={annotationNoteInputRef}
-              data-pdf-annotation-note-input="true"
-              aria-label="批注内容"
-              placeholder="添加批注…"
-              maxLength={MAX_PDF_ANNOTATION_NOTE_LENGTH}
-              value={annotationNoteDraft}
-              style={styles.annotationNoteTextarea}
-              onChange={(event) => { setAnnotationNoteDraft(event.target.value) }}
-              onKeyDown={(event) => {
-                if (event.key === 'Escape') {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  setAnnotationNoteGroupId(undefined)
-                } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                  event.preventDefault()
-                  props.onTextMarkupNoteChange(annotationMenu.groupId, annotationNoteDraft)
-                  setAnnotationNoteGroupId(undefined)
-                }
-              }}
-            />
-            <div style={styles.annotationNoteFooter}>
-              <span style={styles.annotationNoteCount}>
-                {String(annotationNoteDraft.length)} / {String(MAX_PDF_ANNOTATION_NOTE_LENGTH)}
+                        } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault()
+                          if (mixedAiActive) submitMixedAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
+                          else submitTextAiRequest('question', annotationMenu.pending, annotationAiQuestionDraft)
+                        }
+                      }}
+                    />
+                    <div style={styles.annotationNoteFooter}>
+                      <span style={styles.annotationNoteCount}>
+                        {String(annotationAiQuestionDraft.length)} / {String(MAX_PDF_AI_QUESTION_CODE_UNITS)}
+                      </span>
+                      <span style={styles.annotationNoteActions}>
+                        <button
+                          type="button"
+                          style={styles.annotationNoteAction}
+                          onClick={() => {
+                            setAnnotationAiQuestionOpen(false)
+                            setAnnotationAiMenuOpen(true)
+                          }}
+                        >
+                          返回
+                        </button>
+                        <button
+                          type="submit"
+                          data-pdf-ai-question-send="true"
+                          disabled={annotationAiBusy !== undefined || mixedAiBusy !== undefined || annotationAiQuestionDraft.trim().length === 0}
+                          style={{ ...styles.annotationNoteAction, ...styles.annotationNoteSave }}
+                        >
+                          {annotationAiBusy === 'question' || mixedAiBusy === 'question' ? '发送中…' : '发送'}
+                        </button>
+                      </span>
+                    </div>
+                  </form>
+                )}
               </span>
-              <span style={styles.annotationNoteActions}>
-                <button
-                  type="button"
-                  style={styles.annotationNoteAction}
-                  onClick={() => { setAnnotationNoteGroupId(undefined) }}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  data-pdf-annotation-note-save="true"
-                  style={{ ...styles.annotationNoteAction, ...styles.annotationNoteSave }}
-                  onClick={() => {
+            </>
+          )}
+          {annotationMenu.kind === 'annotation' && (
+            <>
+              <span aria-hidden="true" style={styles.annotationMenuDivider} />
+              <button
+                type="button"
+                data-pdf-highlight-delete="true"
+                data-pdf-annotation-action="true"
+                aria-label="删除标记"
+                title="删除标记"
+                style={styles.annotationDeleteButton}
+                onClick={() => {
+                  props.onTextMarkupRemove(annotationMenu.groupId)
+                  setAnnotationMenu(undefined)
+                }}
+              >
+                <DeletePdfIcon />
+              </button>
+            </>
+          )}
+          {annotationMenu.kind === 'annotation' && annotationNoteGroupId === annotationMenu.groupId && (
+            <div
+              data-pdf-annotation-note-editor="true"
+              role="dialog"
+              aria-label="文字标记批注"
+              style={styles.annotationNoteEditor}
+            >
+              <textarea
+                ref={annotationNoteInputRef}
+                data-pdf-annotation-note-input="true"
+                aria-label="批注内容"
+                placeholder="添加批注…"
+                maxLength={MAX_PDF_ANNOTATION_NOTE_LENGTH}
+                value={annotationNoteDraft}
+                style={styles.annotationNoteTextarea}
+                onChange={(event) => { setAnnotationNoteDraft(event.target.value) }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    setAnnotationNoteGroupId(undefined)
+                  } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault()
                     props.onTextMarkupNoteChange(annotationMenu.groupId, annotationNoteDraft)
                     setAnnotationNoteGroupId(undefined)
-                  }}
-                >
-                  保存
-                </button>
-              </span>
+                  }
+                }}
+              />
+              <div style={styles.annotationNoteFooter}>
+                <span style={styles.annotationNoteCount}>
+                  {String(annotationNoteDraft.length)} / {String(MAX_PDF_ANNOTATION_NOTE_LENGTH)}
+                </span>
+                <span style={styles.annotationNoteActions}>
+                  <button
+                    type="button"
+                    style={styles.annotationNoteAction}
+                    onClick={() => { setAnnotationNoteGroupId(undefined) }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    data-pdf-annotation-note-save="true"
+                    style={{ ...styles.annotationNoteAction, ...styles.annotationNoteSave }}
+                    onClick={() => {
+                      props.onTextMarkupNoteChange(annotationMenu.groupId, annotationNoteDraft)
+                      setAnnotationNoteGroupId(undefined)
+                    }}
+                  >
+                    保存
+                  </button>
+                </span>
+              </div>
             </div>
+          )}
+        </div>
+        {annotationMenu.kind === 'selection' && quickTranslate !== undefined && (
+          <div
+            data-pdf-quick-translate-panel="true"
+            role="status"
+            aria-live="polite"
+            aria-label={`${quickTranslate.text} 的译文`}
+            style={styles.quickTranslatePanel}
+          >
+            <div style={styles.quickTranslateHeader}>
+              <span style={styles.quickTranslateWord} title={quickTranslate.text}>{quickTranslate.text}</span>
+              <button
+                type="button"
+                data-pdf-quick-translate-close="true"
+                aria-label="关闭翻译结果"
+                title="关闭翻译结果"
+                style={styles.quickTranslateClose}
+                onClick={() => { closeQuickTranslate() }}
+              >
+                ✕
+              </button>
+            </div>
+            {quickTranslate.phase === 'loading' && (
+              <div style={styles.quickTranslateBody}>翻译中…</div>
+            )}
+            {quickTranslate.phase === 'error' && (
+              <div role="alert" style={{ ...styles.quickTranslateBody, ...styles.quickTranslateError }}>
+                {quickTranslate.message}
+              </div>
+            )}
+            {quickTranslate.phase === 'done' && (
+              <>
+                <div data-pdf-quick-translate-result="true" style={styles.quickTranslateBody}>
+                  {quickTranslate.translation}
+                </div>
+                <div style={styles.quickTranslateFooter}>
+                  <button
+                    type="button"
+                    data-pdf-quick-translate-copy="true"
+                    style={styles.quickTranslateAction}
+                    onClick={() => { void copyPdfTextSelection(quickTranslate.translation ?? "") }}
+                  >
+                    复制译文
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>,
